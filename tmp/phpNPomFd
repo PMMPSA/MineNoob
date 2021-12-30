@@ -1,0 +1,609 @@
+<?php
+
+namespace Infernus101\KitUI;
+
+use Infernus101\KitUI\lang\LangManager;
+use Infernus101\KitUI\tasks\CoolDownTask;
+use Infernus101\KitUI\UI\Handler;
+use pocketmine\command\Command;
+use pocketmine\command\CommandSender;
+use pocketmine\event\Listener;
+use pocketmine\network\mcpe\protocol\ModalFormRequestPacket;
+use pocketmine\Player;
+use pocketmine\plugin\PluginBase;
+use pocketmine\utils\Config;
+use pocketmine\utils\TextFormat;
+
+class Main extends PluginBase implements Listener {
+
+	/** @var Kit[] */
+	public $kits = [];
+	/** @var Kit[] */
+	public $kitUsed = [];
+	/** @var LangManager */
+	public $language;
+	/** @var \PiggyCustomEnchants\Main */
+	public $piggyEnchants;
+	/** @var Config */
+	public $config;
+	/** @var string[][] */
+	public $formData;
+	/** @var Config */
+	private $kit;
+
+	public function onEnable(){
+		@mkdir($this->getDataFolder() . "timer/");
+		$this->configFixer();
+		$files = ["kits.yml", "config.yml"];
+		foreach($files as $file){
+			if(!file_exists($this->getDataFolder() . $file)){
+				@mkdir($this->getDataFolder());
+				file_put_contents($this->getDataFolder() . $file, $this->getResource($file));
+			}
+		}
+		$this->kit = new Config($this->getDataFolder() . "kits.yml", Config::YAML);
+		$this->config = new Config($this->getDataFolder() . "config.yml", Config::YAML);
+		$this->language = new LangManager($this);
+		$this->getServer()->getPluginManager()->registerEvents(new PlayerEvents($this), $this);
+		$this->getScheduler()->scheduleDelayedRepeatingTask(new CoolDownTask($this), 1200, 1200);
+		$this->piggyEnchants = $this->getServer()->getPluginManager()->getPlugin("PiggyCustomEnchants");
+		$allKits = yaml_parse_file($this->getDataFolder() . "kits.yml");
+		foreach($allKits as $name => $data){
+			$this->kits[$name] = new Kit($this, $data, $name);
+		}
+	}
+
+	private function configFixer(){
+		$this->saveResource("kits.yml");
+		$allKits = yaml_parse_file($this->getDataFolder() . "kits.yml");
+		$this->fixConfig($allKits);
+		foreach($allKits as $name => $data){
+			$this->kits[$name] = new Kit($this, $data, $name);
+		}
+	}
+
+	private function fixConfig(&$config){
+		foreach($config as $name => $kit){
+			if(isset($kit["users"])){
+				$users = array_map("strtolower", $kit["users"]);
+				$config[$name]["users"] = $users;
+			}
+			if(isset($kit["worlds"])){
+				$worlds = array_map("strtolower", $kit["worlds"]);
+				$config[$name]["worlds"] = $worlds;
+			}
+		}
+	}
+
+	public function onDisable(){
+		foreach($this->kits as $kit){
+			$kit->save();
+		}
+	}
+
+	public function onCommand(CommandSender $sender, Command $cmd, String $label, array $args): bool{
+		if(!$sender instanceof Player){
+			$sender->sendMessage(TextFormat::RED . "> Command must be run ingame!");
+
+			return true;
+		}
+		switch(strtolower($cmd->getName())){
+			case "kit":
+				if(!$sender->hasPermission("kit.command")){
+					$sender->sendMessage(TextFormat::RED . "> You don't have permission to use this command!");
+
+					return false;
+				}
+				if(isset($args[0])){
+					$sender->sendMessage(TextFormat::GREEN . "About:\nKit UI by Infernus101! github.com/Infernus101/KitUI\n" . TextFormat::BLUE . "Servers - FallenTech.tk 19132");
+
+					return false;
+				}
+				$handler = new Handler();
+				$packet = new ModalFormRequestPacket();
+				$packet->formId = $handler->getWindowIdFor(Handler::KIT_MAIN_MENU);
+				$packet->formData = $handler->getWindowJson(Handler::KIT_MAIN_MENU, $this, $sender);
+				$sender->dataPacket($packet);
+				break;
+		}
+
+		return true;
+	}
+
+	public function getPlayerKit($player, $obj = false){
+		if($player instanceof Player){
+			$player = $player->getName();
+		}
+
+		return isset($this->kitUsed[strtolower($player)]) ? ($obj ? $this->kitUsed[strtolower($player)] : $this->kitUsed[strtolower($player)]->getName()) : null;
+	}
+
+	public function getKit(string $kit): ?Kit{
+		$lower = array_change_key_case($this->kits, CASE_LOWER);
+		if(isset($lower[strtolower($kit)])){
+			return $lower[strtolower($kit)];
+		}
+
+		return null;
+	}
+}
+---
+testkit:
+  # Format: "id:damage:count:name:ench_name:ench_level"
+
+  # If you want only custom name (no enchantments): "id:damage:count:name"
+
+  # If you don't want enchantments or custom name: "id:damage:count"
+
+  # If you want only enchantments (no custom name): "id:damage:count:DEFAULT:ench_name:ench_level" -- you have to put DEFAULT in the name field
+
+  # If you want more than one enchantment just do: "id:damage:count:name:ench1_name:ench1_level:ench2_name:ench2_level"
+  # or "id:damage:count:DEFAULT:ench1_name:ench1_level:ench2_name:ench2_level" if you don't want a custom item name
+
+  # Please note: You have to write numeric IDs
+  items:
+  - "260:0:10"
+  - "267:0:1:Sword Name:sharpness:3:knockback:1"
+  helmet: "302:0:1"
+  chestplate: "303:0:1:DEFAULT:protection:1"
+  leggings: "304:0:1:Leggings Name"
+  boots: "305:0:1"
+
+  commands: # {player} will get replaced by player's name
+  - "tell {player} Kit claimed!"
+
+  cooldown:
+    hours: 24
+    minutes: 30
+
+  # Format: "name:time:amplifier"
+  # Time is in seconds
+  effects:
+  - "speed:120:2"
+  
+  #Kit name to show on the menu, you can use color symbol '§'
+  kit-name: "§ftest"
+
+  # Add a cost for the kit. Compatible with EconomyAPI only
+  # Put 0 if you want the kit to be free
+  money: 50
+  
+  #Enter image url for the kit. png image. The image will be shown in kit main menu if its compatible.
+  image-url: "https://minecraft.gamepedia.com/media/minecraft.gamepedia.com/f/f2/Stone_Sword.png?version=ede6f1623f23eb3959b3d5287dc54bb0"
+
+  # Info to show when selected a Kit in UI form
+  info: "This kit is too op XD Cost: 50$"
+  
+  # Custom Kit perms, CaSe sEnSiTiVe
+  permission: "kit.testkit"
+testkit2:
+
+  items:
+  - "260:0:10"
+  - "267:0:1:Sword Name:sharpness:3:knockback:1"
+  helmet: "302:0:1"
+  chestplate: "303:0:1:DEFAULT:protection:1"
+  leggings: "304:0:1:Leggings Name"
+  boots: "305:0:1"
+
+  commands:
+  - "tell {player} Kit 2 claimed!"
+
+  cooldown:
+    hours: 24
+    minutes: 30
+
+  effects:
+  - "speed:120:2"
+  
+  kit-name: "§ctest2"
+
+  money: 250
+  
+  image-url: ""
+
+  info: "Kit 2! Cost: 250$"
+  
+  permission: "kit.testkit2"
+  
+testkit3:
+
+  items:
+  - "260:0:10"
+  - "267:0:1:Sword Name:sharpness:3:knockback:1"
+  helmet: "302:0:1"
+  chestplate: "303:0:1:DEFAULT:protection:1"
+  leggings: "304:0:1:Leggings Name"
+  boots: "305:0:1"
+
+  commands:
+  - "tell {player} Kit 3 claimed!"
+
+  cooldown:
+    hours: 24
+    minutes: 30
+
+  effects:
+  - "speed:120:2"
+
+  kit-name: "§6test3"
+
+  money: 150
+  
+  image-url: ""
+
+  info: "Kit 3! Cost: 150$"
+  
+  permission: "kit.testkit3"
+...
+<?php
+
+namespace Infernus101\KitUI;
+
+use Infernus101\KitUI\events\KitEquipEvent;
+use Infernus101\KitUI\events\KitPurchaseEvent;
+use onebone\economyapi\EconomyAPI;
+use DaPigGuy\PiggyCustomEnchants\CustomEnchants\CustomEnchants;
+use pocketmine\command\ConsoleCommandSender;
+use pocketmine\entity\Effect;
+use pocketmine\entity\EffectInstance;
+use pocketmine\item\enchantment\Enchantment;
+use pocketmine\item\enchantment\EnchantmentInstance;
+use pocketmine\item\Item;
+use pocketmine\Player;
+
+class Kit {
+
+	public $pl;
+	public $data;
+	public $name;
+	public $cost = 0;
+	public $timer;
+	public $timers = [];
+	public $id = [];
+
+	public function __construct(Main $pl, array $data, string $name){
+		$this->pl = $pl;
+		$this->data = $data;
+		$this->name = $name;
+		$this->timer = $this->getTimerMinutes();
+		if(file_exists($this->pl->getDataFolder() . "timer/" . strtolower($this->name) . ".sl")){
+			$this->timers = unserialize(file_get_contents($this->pl->getDataFolder() . "timer/" . strtolower($this->name) . ".sl"));
+		}
+		if(isset($this->data["money"]) and $this->data["money"] != 0){
+			$this->cost = (int)$this->data["money"];
+		}
+		if(!isset($this->data["permission"])){
+			$this->data["permission"] = "kit." . $this->name;
+		}
+	}
+
+	public function getTimerMinutes(): int{
+		$min = 0;
+		if(isset($this->data["cooldown"]["minutes"])){
+			$min += (int)$this->data["cooldown"]["minutes"];
+		}
+		if(isset($this->data["cooldown"]["hours"])){
+			$min += (int)$this->data["cooldown"]["hours"] * 60;
+		}
+
+		return $min;
+	}
+
+	public function getName(): string{
+		return $this->name;
+	}
+
+	/**
+	 * @param Player $player
+	 * @throws \ReflectionException
+	 */
+	public function equipKit(Player $player){
+		$event = new KitEquipEvent($player, $this);
+		$event->call();
+
+		if($event->isCancelled()){
+			return;
+		}
+
+		$this->add($player);
+	}
+
+	/**
+	 * @param Player $player
+	 * @throws \ReflectionException
+	 */
+	public function add(Player $player){
+		$inv = $player->getInventory();
+		$arm = $player->getArmorInventory();
+
+		if(isset($this->data["money"])){
+			$event = new KitPurchaseEvent($player, $this, $this->data["money"]);
+			$event->call();
+
+			if($event->isCancelled()){
+				goto skipPurchase;
+			}
+
+			EconomyAPI::getInstance()->reduceMoney($player, $event->getPrice());
+		}
+		skipPurchase:
+
+		if($this->pl->config->get("clear-effect")){
+			$player->removeAllEffects();
+		}
+
+		if($this->pl->config->get("clear-inventory")){
+			$inv->clearAll();
+			$player->getCraftingGrid()->clearAll();
+		}
+
+		if(!$this->pl->config->get("start-from-first")){
+			if(count($this->data["items"]) + count($inv->getContents()) > $inv->getSize()){
+				$player->sendMessage($this->pl->language->getTranslation("inv-full"));
+
+				return;
+			}
+			foreach($this->data["items"] as $itemString){
+				$inv->setItem($inv->firstEmpty(), $i = $this->loadItem(...explode(":", $itemString)));
+			}
+		}else{
+			$tag = 0;
+			foreach($this->data["items"] as $itemString){
+				$inv->setItem($tag++, $i = $this->loadItem(...explode(":", $itemString)));
+			}
+		}
+
+		isset($this->data["helmet"]) and $arm->setHelmet($this->loadItem(...explode(":", $this->data["helmet"])));
+		isset($this->data["chestplate"]) and $arm->setChestplate($this->loadItem(...explode(":", $this->data["chestplate"])));
+		isset($this->data["leggings"]) and $arm->setLeggings($this->loadItem(...explode(":", $this->data["leggings"])));
+		isset($this->data["boots"]) and $arm->setBoots($this->loadItem(...explode(":", $this->data["boots"])));
+		$arm->sendContents($player);
+
+		if(isset($this->data["effects"])){
+			foreach($this->data["effects"] as $effectString){
+				$e = $this->loadEffect(...explode(":", $effectString));
+				if($e !== null){
+					$player->addEffect($e);
+				}
+			}
+		}
+
+		if(isset($this->data["commands"]) and is_array($this->data["commands"])){
+			foreach($this->data["commands"] as $cmd){
+				$this->pl->getServer()->dispatchCommand(new ConsoleCommandSender(), str_replace("{player}", $player->getName(), $cmd));
+			}
+		}
+		if(!$player->hasPermission("kit.freepass")){
+			if($this->timer){
+				$this->timers[strtolower($player->getName())] = $this->timer;
+			}
+		}
+
+		$this->pl->kitUsed[strtolower($player->getName())] = $this;
+		$player->sendMessage($this->pl->language->getTranslation("selected-kit", $this->getName()));
+	}
+
+	public function loadItem(int $id = 0, int $damage = 0, int $count = 1, string $name = "default", ...$enchantments): Item{
+		$item = Item::get($id, $damage, $count);
+		if(strtolower($name) !== "default"){
+			$item->setCustomName($name);
+		}
+		$enchantment = null;
+		foreach($enchantments as $key => $name_level){
+			if($key % 2 === 0){ //Name expected
+				$enchantment = Enchantment::getEnchantmentByName((string)$name_level);
+				if($enchantment === null){
+					$enchantment = CustomEnchants::getEnchantmentByName((string)$name_level);
+				}
+			}elseif($enchantment !== null){
+				if($this->pl->piggyEnchants !== null && $enchantment instanceof CustomEnchants){
+					$this->pl->piggyEnchants->addEnchantment($item, $enchantment->getName(), (int)$name_level);
+				}else{
+					$item->addEnchantment(new EnchantmentInstance($enchantment, (int)$name_level));
+				}
+			}
+		}
+
+		return $item;
+	}
+
+	public function loadEffect(string $name = "INVALID", int $seconds = 60, int $amplifier = 1){
+		return new EffectInstance(Effect::getEffectByName($name), $seconds * 20, $amplifier);
+	}
+
+	public function getTimerLeft(Player $player): string{
+		if(($minutes = $this->timers[strtolower($player->getName())]) < 60){
+			return $this->pl->language->getTranslation("timer-format1", $minutes);
+		}
+		if(($modulo = $minutes % 60) !== 0){
+			return $this->pl->language->getTranslation("timer-format2", floor($minutes / 60), $modulo);
+		}
+
+		return $this->pl->language->getTranslation("timer-format3", $minutes / 60);
+	}
+
+	public function processTimer(){
+		foreach($this->timers as $player => $min){
+			$this->timers[$player] -= 1;
+			if($this->timers[$player] <= 0){
+				unset($this->timers[$player]);
+			}
+		}
+	}
+
+	public function testPermission(Player $player): bool{
+		return $player->hasPermission($this->data["permission"]);
+	}
+
+	public function save(){
+		if(count($this->timers) > 0){
+			file_put_contents($this->pl->getDataFolder() . "timer/" . strtolower($this->name) . ".sl", serialize($this->timers));
+		}
+	}
+
+}
+<?php
+
+namespace Infernus101\KitUI\lang;
+
+use Infernus101\KitUI\Main;
+use pocketmine\utils\Config;
+
+class LangManager {
+
+	const LANG_VERSION = 0;
+
+	private $pl;
+	private $defaults;
+	private $data;
+
+	public function __construct(Main $pl){
+		$this->pl = $pl;
+		$this->defaults = [
+			"lang-version"     => 0,
+			"error-title"      => "Error:",
+			"mainmenu-title"   => "Kits -",
+			"mainmenu-content" => "Select a kit for info -",
+			"select-option"    => "Do you wanna select this kit, player?",
+			"selected-kit"     => "Selected kit: {%0}",
+			"inv-full"         => "You do not have enough space in your inventory for this kit",
+			"cant-afford"      => "You cannot afford kit: {%0} Cost: {%1}",
+			"one-per-life"     => "You can only get one kit per life",
+			"no-sign-perm"     => "You don't have permission to create kit sign",
+			"timer1"           => "Kit {%0} is in cooldown at the moment",
+			"timer2"           => "You will be able to get it in {%0}",
+			"noperm"           => "You don't have the permission to use kit {%0}",
+			"timer-format1"    => "{%0} minutes",
+			"timer-format2"    => "{%0} hours and {%1} minutes",
+			"timer-format3"    => "{%0} hours",
+		];
+		$this->data = new Config($this->pl->getDataFolder() . "lang.properties", Config::PROPERTIES, $this->defaults);
+		if($this->data->get("lang-version") != self::LANG_VERSION){
+			$this->pl->getLogger()->alert("Translation file is outdated. The old file has been renamed and a new one has been created");
+			@rename($this->pl->getDataFolder() . "lang.properties", $this->pl->getDataFolder() . "lang.properties.old");
+			$this->data = new Config($this->pl->getDataFolder() . "lang.properties", Config::PROPERTIES, $this->defaults);
+		}
+	}
+
+	public function getTranslation(string $dataKey, ...$args): string{
+		if(!isset($this->defaults[$dataKey])){
+			$this->pl->getLogger()->error("Invalid datakey $dataKey passed to method LangManager::getTranslation()");
+
+			return "";
+		}
+		$str = $this->data->get($dataKey, $this->defaults[$dataKey]);
+		foreach($args as $key => $arg){
+			$str = str_replace("{%" . $key . "}", $arg, $str);
+		}
+
+		return $str;
+	}
+
+}
+<?php
+
+namespace Infernus101\KitUI;
+
+use Infernus101\KitUI\UI\Handler;
+use pocketmine\block\Block;
+use pocketmine\event\block\SignChangeEvent;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerDeathEvent;
+use pocketmine\event\player\PlayerInteractEvent;
+use pocketmine\event\player\PlayerQuitEvent;
+use pocketmine\event\server\DataPacketReceiveEvent;
+use pocketmine\network\mcpe\protocol\ModalFormRequestPacket;
+use pocketmine\network\mcpe\protocol\ModalFormResponsePacket;
+use pocketmine\tile\Sign;
+use pocketmine\utils\TextFormat;
+
+class PlayerEvents implements Listener {
+
+	/** @var Main */
+	public $pl;
+
+	public function __construct(Main $pg){
+		$this->pl = $pg;
+	}
+
+	public function onTap(PlayerInteractEvent $event){
+		$id = $event->getBlock()->getId();
+		if($id === Block::SIGN_POST or $id === Block::WALL_SIGN){
+			$tile = $event->getPlayer()->getLevel()->getTile($event->getBlock());
+			if($tile instanceof Sign){
+				$text = $tile->getText();
+				if(strtolower(TextFormat::clean($text[0])) === strtolower($this->pl->config->get("text-on-sign"))){
+					$event->setCancelled();
+					$handler = new Handler();
+					$packet = new ModalFormRequestPacket();
+					$packet->formId = $handler->getWindowIdFor(Handler::KIT_MAIN_MENU);
+					$packet->formData = $handler->getWindowJson(Handler::KIT_MAIN_MENU, $this->pl, $event->getPlayer());
+					$event->getPlayer()->dataPacket($packet);
+				}
+			}
+		}
+	}
+
+	public function onSignChange(SignChangeEvent $event){
+		if(strtolower(TextFormat::clean($event->getLine(0))) === strtolower($this->pl->config->get("text-on-sign")) and !$event->getPlayer()->hasPermission("kitui.sign")){
+			$event->getPlayer()->sendMessage($this->pl->language->getTranslation("no-sign-perm"));
+			$event->setCancelled();
+		}
+	}
+
+	public function onDeath(PlayerDeathEvent $event){
+		if(isset($this->pl->kitUsed[strtolower($event->getEntity()->getName())])){
+			unset($this->pl->kitUsed[strtolower($event->getEntity()->getName())]);
+		}
+	}
+
+	public function onLogOut(PlayerQuitEvent $event){
+		if($this->pl->config->get("reset-on-logout") and isset($this->pl->kitUsed[strtolower($event->getPlayer()->getName())])){
+			unset($this->pl->kitUsed[strtolower($event->getPlayer()->getName())]);
+		}
+		if(isset($this->pl->formData[strtolower($event->getPlayer()->getName())])) unset($this->pl->formData[strtolower($event->getPlayer()->getName())]);
+	}
+
+	public function onDataPacket(DataPacketReceiveEvent $event){
+		$packet = $event->getPacket();
+		if($packet instanceof ModalFormResponsePacket){
+			$windowHandler = new Handler();
+			$formId = $windowHandler->getWindowIdFor($packet->formId);
+			if(!$windowHandler->isInRange($formId)){
+				return;
+			}
+			if(json_decode($packet->formData, true) === null){
+				return;
+			}
+			if(!isset($this->pl->formData[strtolower($event->getPlayer()->getName())])){
+				return;
+			}
+			$window = $windowHandler->getWindow($formId, $this->pl, $event->getPlayer());
+			$window->handle($packet);
+		}
+	}
+}
+
+<?php
+
+namespace Infernus101\KitUI\tasks;
+
+use Infernus101\KitUI\Main;
+use pocketmine\scheduler\Task;
+
+class CoolDownTask extends Task {
+
+	private $plugin;
+
+	public function __construct(Main $plugin){
+		$this->plugin = $plugin;
+	}
+
+	public function onRun(int $tick){
+		foreach($this->plugin->kits as $kit){
+			$kit->processTimer();
+		}
+	}
+
+}

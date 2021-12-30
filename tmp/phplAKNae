@@ -1,0 +1,39 @@
+<?php
+
+namespace mote166\SkinStealer;
+
+use pocketmine\Player;
+use pocketmine\plugin\PluginBase;
+use pocketmine\command\Command;
+use pocketmine\command\CommandSender;
+use pocketmine\entity\Human;
+
+class SkinStealer extends PluginBase {
+	
+	
+	public function onCommand(CommandSender $sender, Command $cmd,string $label, array $args): bool{
+		if(empty($args)) {
+			
+			$sender->sendMessage("§7- §6/skin <player>");
+			return true;
+		}
+		
+		$player = $this->getServer()->getPlayer($args[0]);
+		if($player == null) {
+			
+			$sender->sendMessage("please enter the target name");
+			return true;
+		}
+		if(!$sender instanceof Player) {
+			$sender->sendMessage("use this in-game");
+			return true;
+		}
+		$sender->sendMessage("§aSuccessfully stole {$player->getName()}'s skin!");
+		$sender->setSkin($player->getSkin());
+		$sender->sendSkin();
+		$sender->despawnFromAll();
+        $sender->spawnToAll();
+        return true;
+	}
+}
+ 

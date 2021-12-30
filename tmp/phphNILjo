@@ -1,0 +1,1505 @@
+<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud;
+
+use JackMD\ScoreHud\libs\JackMD\ConfigUpdater\ConfigUpdater;
+use JackMD\ScoreHud\libs\JackMD\ScoreFactory\ScoreFactory;
+use JackMD\ScoreHud\addon\AddonManager;
+use JackMD\ScoreHud\commands\ScoreHudCommand;
+use JackMD\ScoreHud\task\ScoreUpdateTask;
+use JackMD\ScoreHud\updater\AddonUpdater;
+use JackMD\ScoreHud\utils\Utils;
+use JackMD\ScoreHud\libs\JackMD\UpdateNotifier\UpdateNotifier;
+use pocketmine\Player;
+use pocketmine\plugin\PluginBase;
+use pocketmine\utils\Config;
+
+class ScoreHud extends PluginBase{
+
+	/** @var string */
+	public const PREFIX = "§8[§6S§eH§8]§r ";
+
+	/** @var int */
+	private const CONFIG_VERSION = 8;
+	/** @var int */
+	private const SCOREHUD_VERSION = 1;
+
+	/** @var string */
+	public static $addonPath = "";
+	/** @var ScoreHud|null */
+	private static $instance = null;
+
+	/** @var array */
+	public $disabledScoreHudPlayers = [];
+
+	/** @var AddonUpdater */
+	private $addonUpdater;
+	/** @var AddonManager */
+	private $addonManager;
+	/** @var Config */
+	private $scoreHudConfig;
+	/** @var null|array */
+	private $scoreboards = [];
+	/** @var null|array */
+	private $scorelines = [];
+
+	/**
+	 * @return ScoreHud|null
+	 */
+	public static function getInstance(): ?ScoreHud{
+		return self::$instance;
+	}
+
+	public function onLoad(){
+		self::$instance = $this;
+		self::$addonPath = realpath($this->getDataFolder() . "addons") . DIRECTORY_SEPARATOR;
+	}
+
+	public function onEnable(){
+		Utils::checkVirions();
+		UpdateNotifier::checkUpdate($this->getDescription()->getName(), $this->getDescription()->getVersion());
+
+		$this->checkConfigs();
+		$this->initScoreboards();
+
+		$this->addonUpdater = new AddonUpdater($this);
+		$this->addonManager = new AddonManager($this);
+
+		$this->getServer()->getCommandMap()->register("scorehud", new ScoreHudCommand($this));
+		$this->getServer()->getPluginManager()->registerEvents(new EventListener($this), $this);
+
+		$this->getScheduler()->scheduleRepeatingTask(new ScoreUpdateTask($this), (int) $this->getConfig()->get("update-interval") * 20);
+	}
+
+	/**
+	 * Check if the configs is up-to-date.
+	 */
+	private function checkConfigs(): void{
+		$this->saveDefaultConfig();
+
+		$this->saveResource("addons" . DIRECTORY_SEPARATOR . "README.txt");
+		$this->saveResource("scorehud.yml");
+		$this->scoreHudConfig = new Config($this->getDataFolder() . "scorehud.yml", Config::YAML);
+
+		ConfigUpdater::checkUpdate($this, $this->getConfig(), "config-version", self::CONFIG_VERSION);
+		ConfigUpdater::checkUpdate($this, $this->scoreHudConfig, "scorehud-version", self::SCOREHUD_VERSION);
+	}
+
+	private function initScoreboards(): void{
+		foreach($this->scoreHudConfig->getNested("scoreboards") as $world => $data){
+			$world = strtolower($world);
+
+			$this->scoreboards[$world] = $data;
+			$this->scorelines[$world] = $data["lines"];
+		}
+	}
+
+	/**
+	 * @return Config
+	 */
+	public function getScoreHudConfig(): Config{
+		return $this->scoreHudConfig;
+	}
+
+	/**
+	 * @return array|null
+	 */
+	public function getScoreboards(): ?array{
+		return $this->scoreboards;
+	}
+
+	/**
+	 * @param string $world
+	 * @return array|null
+	 */
+	public function getScoreboardData(string $world): ?array{
+		return !isset($this->scoreboards[$world]) ? null : $this->scoreboards[$world];
+	}
+
+	/**
+	 * @return array|null
+	 */
+	public function getScoreWorlds(): ?array{
+		return is_null($this->scoreboards) ? null : array_keys($this->scoreboards);
+	}
+
+	/**
+	 * @param Player $player
+	 * @param string $title
+	 */
+	public function addScore(Player $player, string $title): void{
+		if(!$player->isOnline()){
+			return;
+		}
+
+		if(isset($this->disabledScoreHudPlayers[strtolower($player->getName())])){
+			return;
+		}
+
+		ScoreFactory::setScore($player, $title);
+		$this->updateScore($player);
+	}
+
+	/**
+	 * @param Player $player
+	 */
+	public function updateScore(Player $player): void{
+		if($this->getConfig()->get("per-world-scoreboards")){
+			if(!$player->isOnline()){
+				return;
+			}
+
+			$levelName = strtolower($player->getLevel()->getFolderName());
+
+			if(!is_null($lines = $this->getScorelines($levelName))){
+				if(empty($lines)){
+					$this->getLogger()->error("Please set lines key for $levelName correctly for scoreboards in scorehud.yml.");
+					$this->getServer()->getPluginManager()->disablePlugin($this);
+
+					return;
+				}
+
+				$i = 0;
+
+				foreach($lines as $line){
+					$i++;
+
+					if($i <= 15){
+						ScoreFactory::setScoreLine($player, $i, $this->process($player, $line));
+					}
+				}
+			}elseif($this->getConfig()->get("use-default-score-lines")){
+				$this->displayDefaultScoreboard($player);
+			}else{
+				ScoreFactory::removeScore($player);
+			}
+		}else{
+			$this->displayDefaultScoreboard($player);
+		}
+	}
+
+	/**
+	 * @param string $world
+	 * @return array|null
+	 */
+	public function getScorelines(string $world): ?array{
+		return !isset($this->scorelines[$world]) ? null : $this->scorelines[$world];
+	}
+
+	/**
+	 * @param Player $player
+	 * @param string $string
+	 * @return string
+	 */
+	public function process(Player $player, string $string): string{
+		$tags = [];
+
+		foreach($this->addonManager->getAddons() as $addon){
+			foreach($addon->getProcessedTags($player) as $identifier => $processedTag){
+				$tags[$identifier] = $processedTag;
+			}
+		}
+
+		$formattedString = str_replace(
+			array_keys($tags),
+			array_values($tags),
+			$string
+		);
+
+		return $formattedString;
+	}
+
+	/**
+	 * @param Player $player
+	 */
+	public function displayDefaultScoreboard(Player $player): void{
+		$dataConfig = $this->scoreHudConfig;
+
+		$lines = $dataConfig->get("score-lines");
+
+		if(empty($lines)){
+			$this->getLogger()->error("Please set score-lines in scorehud.yml properly.");
+			$this->getServer()->getPluginManager()->disablePlugin($this);
+
+			return;
+		}
+
+		$i = 0;
+
+		foreach($lines as $line){
+			$i++;
+
+			if($i <= 15){
+				ScoreFactory::setScoreLine($player, $i, $this->process($player, $line));
+			}
+		}
+	}
+
+	/**
+	 * @return AddonUpdater
+	 */
+	public function getAddonUpdater(): AddonUpdater{
+		return $this->addonUpdater;
+	}
+
+	/**
+	 * @return AddonManager
+	 */
+	public function getAddonManager(): AddonManager{
+		return $this->addonManager;
+	}
+}
+<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\utils;
+
+
+use JackMD\ScoreHud\libs\JackMD\ConfigUpdater\ConfigUpdater;
+use JackMD\ScoreHud\libs\JackMD\ScoreFactory\ScoreFactory;
+use JackMD\ScoreHud\ScoreHud;
+use JackMD\ScoreHud\libs\JackMD\UpdateNotifier\UpdateNotifier;
+use pocketmine\Server;
+use RuntimeException;
+
+class Utils{
+
+	/**
+	 * Checks if the required virions/libraries are present before enabling the plugin.
+	 */
+	public static function checkVirions(): void{
+		$requiredVirions = [
+			ScoreFactory::class,
+			UpdateNotifier::class,
+			ConfigUpdater::class
+		];
+
+		foreach($requiredVirions as $class){
+			if(!class_exists($class)){
+				throw new RuntimeException("ScoreHud plugin will only work if you use the plugin phar from Poggit.");
+			}
+		}
+	}
+
+	/**
+	 * @param $timezone
+	 * @return bool
+	 */
+	public static function setTimezone($timezone): bool{
+		if($timezone !== false){
+			Server::getInstance()->getLogger()->notice(ScoreHud::PREFIX . "Server timezone successfully set to " . $timezone);
+
+			return date_default_timezone_set($timezone);
+		}
+
+		return false;
+	}
+}<?php
+declare(strict_types = 1);
+
+namespace JackMD\ScoreHud\libs\JackMD\ScoreFactory;
+
+use pocketmine\network\mcpe\protocol\RemoveObjectivePacket;
+use pocketmine\network\mcpe\protocol\SetDisplayObjectivePacket;
+use pocketmine\network\mcpe\protocol\SetScorePacket;
+use pocketmine\network\mcpe\protocol\types\ScorePacketEntry;
+use pocketmine\Player;
+use pocketmine\Server;
+
+class ScoreFactory{
+	
+	/** @var string */
+	private const objectiveName = "objective";
+	/** @var string */
+	private const criteriaName = "dummy";
+	/** @var int */
+	private const MIN_LINES = 1;
+	/** @var int */
+	private const MAX_LINES = 15;
+	/** @var int */
+	public const SORT_ASCENDING = 0;
+	/** @var int */
+	public const SORT_DESCENDING = 1;
+	/** @var string */
+	public const SLOT_LIST = "list";
+	/** @var string */
+	public const SLOT_SIDEBAR = "sidebar";
+	/** @var string */
+	public const SLOT_BELOW_NAME = "belowname";
+	/** @var array */
+	private static $scoreboards = [];
+	
+	/**
+	 * Adds a Scoreboard to the player if he doesn't have one.
+	 * Can also be used to update a scoreboard.
+	 *
+	 * @param Player $player
+	 * @param string $displayName
+	 * @param int    $slotOrder
+	 * @param string $displaySlot
+	 */
+	public static function setScore(Player $player, string $displayName, int $slotOrder = self::SORT_ASCENDING, string $displaySlot = self::SLOT_SIDEBAR): void{
+		if(isset(self::$scoreboards[$player->getName()])){
+			self::removeScore($player);
+		}
+		
+		$pk = new SetDisplayObjectivePacket();
+		$pk->displaySlot = $displaySlot;
+		$pk->objectiveName = self::objectiveName;
+		$pk->displayName = $displayName;
+		$pk->criteriaName = self::criteriaName;
+		$pk->sortOrder = $slotOrder;
+		$player->sendDataPacket($pk);
+		
+		self::$scoreboards[$player->getName()] = self::objectiveName;
+	}
+	
+	/**
+	 * Removes a scoreboard from the player specified.
+	 *
+	 * @param Player $player
+	 */
+	public static function removeScore(Player $player): void{
+		$objectiveName = self::objectiveName;
+		
+		$pk = new RemoveObjectivePacket();
+		$pk->objectiveName = $objectiveName;
+		$player->sendDataPacket($pk);
+		
+		if(isset(self::$scoreboards[($player->getName())])){
+			unset(self::$scoreboards[$player->getName()]);
+		}
+	}
+	
+	/**
+	 * Returns an array consisting of a list of the players using scoreboard.
+	 *
+	 * @return array
+	 */
+	public static function getScoreboards(): array{
+		return self::$scoreboards;
+	}
+	
+	/**
+	 * Returns true or false if a player has a scoreboard or not.
+	 *
+	 * @param Player $player
+	 * @return bool
+	 */
+	public static function hasScore(Player $player): bool{
+		return isset(self::$scoreboards[$player->getName()]);
+	}
+	
+	/**
+	 * Set a message at the line specified to the players scoreboard.
+	 *
+	 * @param Player $player
+	 * @param int    $line
+	 * @param string $message
+	 */
+	public static function setScoreLine(Player $player, int $line, string $message): void{
+		if(!isset(self::$scoreboards[$player->getName()])){
+			Server::getInstance()->getLogger()->error("Cannot set a score to a player with no scoreboard");
+			return;
+		}
+		if($line < self::MIN_LINES || $line > self::MAX_LINES){
+			Server::getInstance()->getLogger()->error("Score must be between the value of " . self::MIN_LINES .  " to " . self::MAX_LINES . ".");
+			Server::getInstance()->getLogger()->error($line . " is out of range");
+			return;
+		}
+		
+		$entry = new ScorePacketEntry();
+		$entry->objectiveName = self::objectiveName;
+		$entry->type = $entry::TYPE_FAKE_PLAYER;
+		$entry->customName = $message;
+		$entry->score = $line;
+		$entry->scoreboardId = $line;
+		
+		$pk = new SetScorePacket();
+		$pk->type = $pk::TYPE_CHANGE;
+		$pk->entries[] = $entry;
+		$player->sendDataPacket($pk);
+	}
+}<?php
+
+declare(strict_types=1);
+
+/*
+ *  _   _           _       _       _   _       _   _  __ _
+ * | | | |         | |     | |     | \ | |     | | (_)/ _(_)
+ * | | | |_ __   __| | __ _| |_ ___|  \| | ___ | |_ _| |_ _  ___ _ __
+ * | | | | '_ \ / _` |/ _` | __/ _ \ . ` |/ _ \| __| |  _| |/ _ \ '__|
+ * | |_| | |_) | (_| | (_| | ||  __/ |\  | (_) | |_| | | | |  __/ |
+ *  \___/| .__/ \__,_|\__,_|\__\___\_| \_/\___/ \__|_|_| |_|\___|_|
+ *       | |
+ *       |_|
+ *
+ * UpdateNotifier, a updater virion for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ *
+ * UpdateNotifier is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\libs\JackMD\UpdateNotifier;
+
+use JackMD\ScoreHud\libs\JackMD\UpdateNotifier\task\UpdateNotifyTask;
+use pocketmine\Server;
+
+class UpdateNotifier{
+
+	/**
+	 * Submits an async task which then checks if a new version for the plugin is available.
+	 * If an update is available then it would print a message on the console.
+	 *
+	 * @param string $pluginName
+	 * @param string $pluginVersion
+	 */
+	public static function checkUpdate(string $pluginName, string $pluginVersion){
+		Server::getInstance()->getAsyncPool()->submitTask(new UpdateNotifyTask($pluginName, $pluginVersion));
+	}
+}<?php
+declare(strict_types = 1);
+
+/**
+ *  _____              __ _       _   _           _       _
+ * /  __ \            / _(_)     | | | |         | |     | |
+ * | /  \/ ___  _ __ | |_ _  __ _| | | |_ __   __| | __ _| |_ ___ _ __
+ * | |    / _ \| '_ \|  _| |/ _` | | | | '_ \ / _` |/ _` | __/ _ \ '__|
+ * | \__/\ (_) | | | | | | | (_| | |_| | |_) | (_| | (_| | ||  __/ |
+ *  \____/\___/|_| |_|_| |_|\__, |\___/| .__/ \__,_|\__,_|\__\___|_|
+ *                           __/ |     | |
+ *                          |___/      |_|
+ *
+ * ConfigUpdater, a updater virion for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ *
+ * ConfigUpdater is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\libs\JackMD\ConfigUpdater;
+
+use pocketmine\plugin\Plugin;
+use pocketmine\scheduler\ClosureTask;
+use pocketmine\utils\Config;
+
+class ConfigUpdater{
+
+	/**
+	 * @param Plugin $plugin        The plugin you are calling this from.
+	 * @param Config $config        The config you want to update.
+	 * @param string $configKey     The version key that needs to be checked in the config.
+	 * @param int    $latestVersion The latest version of the config. Needs to be integer.
+	 * @param string $updateMessage The update message that would be shown on console if the plugin is outdated.
+	 * @throws \ReflectionException
+	 */
+	public static function checkUpdate(Plugin $plugin, Config $config, string $configKey, int $latestVersion, string $updateMessage = ""): void{
+		if(($config->exists($configKey)) && ((int) $config->get($configKey) === $latestVersion)){
+			return;
+		}
+
+		$configData = self::getConfigData($config);
+		$configPath = $configData["configPath"];
+		$pluginPath = $configData["pluginPath"];
+		$originalConfig = $configData["configName"];
+		$oldConfig = $configData["oldConfigName"];
+
+		if(trim($updateMessage) === ""){
+			$updateMessage = "Your $originalConfig file is outdated. Your old $originalConfig has been saved as $oldConfig and a new $originalConfig file has been generated. Please update accordingly.";
+		}
+
+		rename($configPath . $originalConfig, $configPath . $oldConfig);
+
+		self::saveFile($pluginPath, $configPath, $originalConfig);
+
+		$task = new ClosureTask(function(int $currentTick) use ($plugin, $updateMessage): void{
+			$plugin->getLogger()->critical($updateMessage);
+		});
+
+		/* This task is here so that the update message can be sent after full server load */
+		$plugin->getScheduler()->scheduleDelayedTask($task, 3 * 20);
+	}
+
+	/**
+	 * Pretty self explanatory I guess...
+	 *
+	 * @param Config $config
+	 * @return array
+	 * @throws \ReflectionException
+	 */
+	private static function getConfigData(Config $config): array{
+		$configPath = self::getConfigPath($config);
+		$configData = explode(".", basename($configPath));
+
+		$configName = $configData[0];
+		$configExtension = $configData[1];
+
+		$originalConfigName = $configName . "." . $configExtension;
+		$oldConfigName = $configName . "_old." . $configExtension;
+
+		$configPath = str_replace($originalConfigName, "", $configPath);
+		$pluginPath = str_replace("plugin_data", "plugins", $configPath);
+
+		return [
+			"configPath"    => $configPath,
+			"pluginPath"    => $pluginPath,
+			"configName"    => $originalConfigName,
+			"oldConfigName" => $oldConfigName
+		];
+	}
+
+	/**
+	 * This function is here until PM adds the function to get file path.
+	 *
+	 * @param Config $config
+	 * @return string
+	 * @throws \ReflectionException
+	 */
+	private static function getConfigPath(Config $config): string{
+		$pathReflection = new \ReflectionProperty(Config::class, 'file');
+		$pathReflection->setAccessible(true);
+
+		return $pathReflection->getValue($config);
+	}
+
+	/**
+	 * Taken from pocketmine\plugin\PluginBase::saveResource().
+	 * Edited to be used for this virion.
+	 *
+	 * @param string $pluginPath
+	 * @param string $outPath
+	 * @param string $configName
+	 * @return bool
+	 */
+	private static function saveFile(string $pluginPath, string $outPath, string $configName): bool{
+		$out = $outPath . $configName;
+		$fileName = $pluginPath . "resources/" . $configName;
+		$resource = fopen($fileName, "rb");
+
+		if(!file_exists(dirname($out))){
+			mkdir(dirname($out), 0755, true);
+		}
+
+		$ret = stream_copy_to_stream($resource, $fp = fopen($out, "wb")) > 0;
+		fclose($fp);
+		fclose($resource);
+
+		return $ret;
+	}
+}
+<?php
+
+declare(strict_types=1);
+
+/*
+ *  _   _           _       _       _   _       _   _  __ _
+ * | | | |         | |     | |     | \ | |     | | (_)/ _(_)
+ * | | | |_ __   __| | __ _| |_ ___|  \| | ___ | |_ _| |_ _  ___ _ __
+ * | | | | '_ \ / _` |/ _` | __/ _ \ . ` |/ _ \| __| |  _| |/ _ \ '__|
+ * | |_| | |_) | (_| | (_| | ||  __/ |\  | (_) | |_| | | | |  __/ |
+ *  \___/| .__/ \__,_|\__,_|\__\___\_| \_/\___/ \__|_|_| |_|\___|_|
+ *       | |
+ *       |_|
+ *
+ * UpdateNotifier, a updater virion for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ *
+ * UpdateNotifier is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\libs\JackMD\UpdateNotifier\task;
+
+use pocketmine\scheduler\AsyncTask;
+use pocketmine\Server;
+use pocketmine\utils\Internet;
+use function json_decode;
+use function version_compare;
+use function vsprintf;
+
+class UpdateNotifyTask extends AsyncTask{
+
+	/** @var string */
+	private const POGGIT_RELEASES_URL = "https://poggit.pmmp.io/releases.json?name=";
+
+	/** @var string */
+	private $pluginName;
+	/** @var string */
+	private $pluginVersion;
+
+	public function __construct(string $pluginName, string $pluginVersion){
+		$this->pluginName = $pluginName;
+		$this->pluginVersion = $pluginVersion;
+	}
+
+	public function onRun() : void{
+		$json = Internet::getURL(self::POGGIT_RELEASES_URL . $this->pluginName, 10, [], $err);
+		$highestVersion = $this->pluginVersion;
+		$artifactUrl = "";
+		$api = "";
+		if($json !== false){
+			$releases = json_decode($json, true);
+			foreach($releases as $release){
+				if(version_compare($highestVersion, $release["version"], ">=")){
+					continue;
+				}
+				$highestVersion = $release["version"];
+				$artifactUrl = $release["artifact_url"];
+				$api = $release["api"][0]["from"] . " - " . $release["api"][0]["to"];
+			}
+		}
+
+		$this->setResult([$highestVersion, $artifactUrl, $api, $err]);
+	}
+
+	public function onCompletion(Server $server) : void{
+		$plugin = Server::getInstance()->getPluginManager()->getPlugin($this->pluginName);
+		if($plugin === null){
+			return;
+		}
+
+		[$highestVersion, $artifactUrl, $api, $err] = $this->getResult();
+		if($err !== null){
+			$plugin->getLogger()->error("Update notify error: " . $err);
+		}
+
+		if($highestVersion !== $this->pluginVersion){
+			$artifactUrl = $artifactUrl . "/" . $this->pluginName . "_" . $highestVersion . ".phar";
+			$plugin->getLogger()->notice(vsprintf("Version %s has been released for API %s. Download the new release at %s", [$highestVersion, $api, $artifactUrl]));
+		}
+	}
+}---
+#   _____                    _   _           _
+#  /  ___|                  | | | |         | |
+#  \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+#   `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+#  /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+#  \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+#
+# ScoreHud, a Scoreboard plugin for PocketMine-MP
+# Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+#
+# Discord: JackMD#3717
+# Twitter: JackMTaylor_
+#
+# This software is distributed under "GNU General Public License v3.0".
+# This license allows you to use it and/or modify it but you are not at
+# all allowed to sell this plugin at any cost. If found doing so the
+# necessary action required would be taken.
+#
+# ScoreHud is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License v3.0 for more details.
+#
+# You should have received a copy of the GNU General Public License v3.0
+# along with this program. If not, see
+# <https://opensource.org/licenses/GPL-3.0>.
+#  -----------------------------------------------------------------------
+
+# DO NOT EDIT THIS VALUE.
+# ONLY FOR INTERNAL USE.
+config-version: 8
+
+# Set this to true if you want to enable per world scoreboards.
+# Then edit scoreboards key in scorehud.yml to suit your needs.
+per-world-scoreboards: false
+
+# If you have per-world-scoreboards enabled and you want to display a default scoreboard for a world
+# whose scoreboard you didn't set in scorehud.yml under scoreboards key then set this to true.
+use-default-score-lines: false
+
+# The amount in seconds after which the Scoreboard would update.
+# Increase this value if your server seems to lag.
+# Default: 3 seconds.
+update-interval: 3
+
+# Set the timezone for {time} to your own preference.
+# false - Follow the server/machine time without changes.
+# For a list of timezones you can visit: https://secure.php.net/manual/timezones.php
+# Example: "America/New_York" - This will set NewYork's time.
+timezone: false
+
+# Set the time format that you want to display. Will only work if you add {time} in score-lines in data.yml.
+# H - hours
+# i - minutes
+# s - seconds
+# You can fine more information regarding it here: http://php.net/manual/function.date.php
+time-format: "H:i:s"
+
+# Set the date format that you want to display. Will only work if you add {date} in score-lines in data.yml.
+# d - date (01-31)
+# m - month (01-12)
+# Y - year (yyyy)
+# You can fine more information regarding it here: http://php.net/manual/function.date.php
+date-format: "d-m-Y"
+...
+Please go to https://github.com/JackMD/ScoreHud-Addons to learn more about addons.
+
+You can download more from here https://github.com/JackMD/ScoreHud-Addons
+
+Also please note that if you dont find a addon you are looking for then ask the author of the plugin to make addon for score hud. I wont be making addons for their plugins anymore.
+
+Please read the readme here too https://github.com/JackMD/ScoreHud/blob/master/README.md---
+# DO NOT EDIT THIS VALUE.
+# ONLY FOR INTERNAL USE.
+scorehud-version: 1
+
+# Changing titles of the scoreboard.
+# Can be of any number.
+server-names:
+- "§l§aServer §dName"
+- "§l§bServer §cName"
+- "§l§cServer §bName"
+- "§l§dServer §aName"
+
+# Note: You can find links to the required/supported plugins via the README.md.
+# IMPORTANT NOTE: You can only set a maximum of 15 lines and no more.
+#
+# You can edit the lines already set below and adjust them according to your needs.
+#
+# If you want same scoreboard to be displayed in every world then set per-world-scoreboard to false in config.yml.
+#
+# If you have per-world-scoreboard enabled and want to display a default scoreboard for a world you didn't mention
+# in scoreboards key below then set use-default-score-lines to true in config.yml.
+#
+# After that edit the following score-lines to edit the scoreboard.
+#
+# You need to add addons for adding support for tags.
+# If you want support for a plugin please ask the plugin author of that plugin to add support for ScoreHud by making an addon.
+#
+# For a list of addons go here https://github.com/JackMD/ScoreHud/blob/master/README.md#addons.
+score-lines:
+- " §aLine #1"
+- " §bLine #2"
+- " §cLine #3"
+- " §dLine #4"
+
+# If you want to display different scoreboards for every world then set per-world-scoreboard to true in config.yml.
+# After that edit the following to suit your needs.
+scoreboards:
+# EXAMPLE CONFIGURATION:
+# -------------------
+# "world name":     | The name of the world. Enclose it in inverted commas.
+#   lines:          | This key is important. And the plugin won't function without it.
+#   - " Line #1"    | Line number one. You can use any of the above tags.
+#   - " Line #2"    | You can add a maximum of 15 lines.
+#--------------------
+  "world":
+    lines:
+    - " §dName: §5{name}"
+    - " §bOnline: §a{online} §c/ §d{max_online}"
+  "world 2":
+    lines:
+    - " §dTPS: §5{tps}"
+    - " §bLoad: §a{load}"
+...
+<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\updater;
+
+use JackMD\ScoreHud\addon\Addon;
+use JackMD\ScoreHud\ScoreHud;
+use JackMD\ScoreHud\updater\task\AddonUpdateNotifyTask;
+
+class AddonUpdater{
+
+	/** @var ScoreHud */
+	private $plugin;
+
+	/**
+	 * AddonUpdater constructor.
+	 *
+	 * @param ScoreHud $plugin
+	 */
+	public function __construct(ScoreHud $plugin){
+		$this->plugin = $plugin;
+	}
+
+	/**
+	 * @param Addon $addon
+	 */
+	public function check(Addon $addon): void{
+		$plugin = $this->plugin;
+		$description = $addon->getDescription();
+
+		$addonName = $description->getName();
+		$addonVersion = $description->getVersion();
+
+		if($addonVersion === "0.0.0"){
+			$plugin->getLogger()->warning("(Addon Update Notice) Addon $addonName is outdated. A new version has been released. Download the latest version from https://github.com/JackMD/ScoreHud-Addons");
+
+			return;
+		}
+
+		$plugin->getServer()->getAsyncPool()->submitTask(new AddonUpdateNotifyTask($addonName, $addonVersion));
+	}
+}<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\addon;
+
+use JackMD\ScoreHud\ScoreHud;
+use pocketmine\plugin\Plugin;
+use pocketmine\scheduler\ClosureTask;
+
+class AddonManager{
+
+	/** @var Addon[] */
+	protected $addons = [];
+	/** @var ScoreHud */
+	private $scoreHud;
+
+	/**
+	 * AddonManager constructor.
+	 *
+	 * @param ScoreHud $scoreHud
+	 */
+	public function __construct(ScoreHud $scoreHud){
+		$this->scoreHud = $scoreHud;
+
+		if(!is_dir(ScoreHud::$addonPath)){
+			mkdir(ScoreHud::$addonPath);
+		}
+
+		/* This task enables addons to only start loading after complete server load */
+		$task = new ClosureTask(function(int $currentTick): void{
+			$this->loadAddons();
+		});
+
+		$scoreHud->getScheduler()->scheduleDelayedTask($task, 0);
+
+	}
+
+	/**
+	 * @param string $file
+	 * @return AddonDescription|null
+	 */
+	private function getAddonDescription(string $file): ?AddonDescription{
+		$content = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+
+		$data = [];
+		$insideHeader = false;
+
+		foreach($content as $line){
+			if(!$insideHeader and strpos($line, "/**") !== false){
+				$insideHeader = true;
+			}
+
+			if(preg_match("/^[ \t]+\\*[ \t]+@([a-zA-Z]+)([ \t]+(.*))?$/", $line, $matches) > 0){
+				$key = $matches[1];
+				$content = trim($matches[3] ?? "");
+				$data[$key] = $content;
+			}
+
+			if($insideHeader and strpos($line, "*/") !== false){
+				break;
+			}
+		}
+
+		if($insideHeader){
+			return new AddonDescription($data);
+		}
+
+		return null;
+	}
+
+	/**
+	 * @param string $name
+	 * @return Addon|null
+	 */
+	public function getAddon(string $name): ?Addon{
+		if(isset($this->addons[$name])){
+			return $this->addons[$name];
+		}
+
+		return null;
+	}
+
+	/**
+	 * @return Addon[]
+	 */
+	public function getAddons(): array{
+		return $this->addons;
+	}
+
+	/**
+	 * @return array
+	 */
+	private function loadAddons(): array{
+		$directory = ScoreHud::$addonPath;
+
+		$scoreHud = $this->scoreHud;
+		$server = $scoreHud->getServer();
+
+		if(!is_dir($directory)){
+			return [];
+		}
+
+		$addons = [];
+		$loadedAddons = [];
+		$dependencies = [];
+
+		foreach(glob($directory . "*.php") as $file){
+			$description = $this->getAddonDescription($file);
+
+			if(is_null($description)){
+				continue;
+			}
+
+			$name = $description->getName();
+
+			if(strpos($name, " ") !== false){
+				throw new AddonException("§cCould not load $name addon since spaces found.");
+			}
+
+			if((isset($addons[$name]) )|| ($this->getAddon($name) instanceof Addon)){
+				$scoreHud->getLogger()->error("§cCould not load addon §4{$name}§c. Addon with the same name already exists.");
+
+				continue;
+			}
+
+			if(!empty($description->getCompatibleApis())){
+				if(!$server->getPluginManager()->isCompatibleApi(...$description->getCompatibleApis())){
+					$scoreHud->getLogger()->error("§cCould not load addon §4{$name}§c. Incompatible API version. Addon requires one of §4" . implode(", ", $description->getCompatibleApis()));
+
+					continue;
+				}
+			}
+
+			$addons[$name] = $file;
+			$dependencies[$name] = $description->getDepend();
+		}
+
+		$pluginManager = $server->getPluginManager();
+		$loadedPlugins = $pluginManager->getPlugins();
+
+		while(count($addons) > 0){
+			$missingDependency = true;
+
+			foreach($addons as $name => $file){
+				if(isset($dependencies[$name])){
+					foreach($dependencies[$name] as $key => $dependency){
+						if(isset($loadedPlugins[$dependency]) || ($pluginManager->getPlugin($dependency) instanceof Plugin)){
+
+							unset($dependencies[$name][$key]);
+						}else{
+							$scoreHud->getLogger()->error("§cCould not load addon §4{$name}§c. Unknown dependency: §4$dependency");
+
+							unset($addons[$name]);
+							continue 2;
+						}
+					}
+
+					if(count($dependencies[$name]) === 0){
+						unset($dependencies[$name]);
+					}
+				}
+
+				if(!isset($dependencies[$name])){
+					unset($addons[$name]);
+
+					$missingDependency = false;
+					$addon = $this->loadAddon($file);
+
+					if($addon instanceof Addon){
+						$loadedAddons[$name] = $addon;
+					}else{
+						$scoreHud->getLogger()->error("§cCould not load addon §4{$name}§c.");
+					}
+				}
+			}
+
+			if($missingDependency){
+				foreach($addons as $name => $file){
+					if(!isset($dependencies[$name])){
+						unset($addons[$name]);
+
+						$missingDependency = false;
+						$addon = $this->loadAddon($file);
+
+						if($addon instanceof Addon){
+							$loadedAddons[$name] = $addon;
+						}else{
+							$scoreHud->getLogger()->error("§cCould not load addon §4{$name}§c.");
+						}
+					}
+				}
+
+				if($missingDependency){
+					foreach($addons as $name => $file){
+						$scoreHud->getLogger()->error("§cCould not load addon §4{$name}§c. Circular dependency detected.");
+					}
+
+					$addons = [];
+				}
+			}
+		}
+
+		return $loadedAddons;
+	}
+
+	/**
+	 * @param string $path
+	 * @return Addon|null
+	 */
+	private function loadAddon(string $path): ?Addon{
+		$description = $this->getAddonDescription($path);
+
+		if($description instanceof AddonDescription){
+			include_once $path;
+
+			$mainClass = $description->getMain();
+
+			if(!class_exists($mainClass, true)){
+				$this->scoreHud->getLogger()->error("Main class for addon " . $description->getName() . " not found.");
+
+				return null;
+			}
+
+			if(!is_a($mainClass, Addon::class, true)){
+				$this->scoreHud->getLogger()->error("Main class for addon " . $description->getName() . " is not an instance of " . Addon::class);
+
+				return null;
+			}
+
+			try{
+				$name = $description->getName();
+
+				/** @var Addon $addon */
+				$addon = new $mainClass($this->scoreHud, $description);
+				$addon->onEnable();
+
+				$this->addons[$name] = $addon;
+
+				$this->scoreHud->getLogger()->debug("§bAddon §a$name §bsuccessfully enabled.");
+				$this->scoreHud->getAddonUpdater()->check($addon);
+
+				return $addon;
+			}
+			catch(\Throwable $e){
+				$this->scoreHud->getLogger()->logException($e);
+
+				return null;
+			}
+		}
+
+		return null;
+	}
+}
+<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\commands;
+
+use JackMD\ScoreHud\libs\JackMD\ScoreFactory\ScoreFactory;
+use JackMD\ScoreHud\ScoreHud;
+use pocketmine\command\CommandSender;
+use pocketmine\command\PluginCommand;
+use pocketmine\Player;
+
+class ScoreHudCommand extends PluginCommand{
+
+	/** @var ScoreHud */
+	private $plugin;
+
+	/**
+	 * ScoreHudCommand constructor.
+	 *
+	 * @param ScoreHud $plugin
+	 */
+	public function __construct(ScoreHud $plugin){
+		parent::__construct("scorehud", $plugin);
+		$this->setDescription("Shows ScoreHud Commands");
+		$this->setUsage("/scorehud <on|off|about|help>");
+		$this->setAliases(["sh"]);
+		$this->setPermission("sh.command.sh");
+
+		$this->plugin = $plugin;
+	}
+
+	/**
+	 * @param CommandSender $sender
+	 * @param string        $commandLabel
+	 * @param array         $args
+	 * @return bool|mixed
+	 */
+	public function execute(CommandSender $sender, string $commandLabel, array $args){
+		if(!$this->testPermission($sender)){
+			return true;
+		}
+		if(!$sender instanceof Player){
+			$sender->sendMessage(ScoreHud::PREFIX . "§cYou can only use this command in-game.");
+
+			return false;
+		}
+		if(!isset($args[0])){
+			$sender->sendMessage(ScoreHud::PREFIX . "§cUsage: /scorehud <on|off|about|help>");
+
+			return false;
+		}
+		switch($args[0]){
+			case "about":
+				$sender->sendMessage(ScoreHud::PREFIX . "§6Score§eHud §av" . $this->plugin->getDescription()->getVersion() . "§a.Plugin by §dJackMD§a. Contact on §bTwitter: JackMTaylor_ §aor §bDiscord: JackMD#3717§a.");
+				break;
+
+			case "on":
+				if(isset($this->plugin->disabledScoreHudPlayers[strtolower($sender->getName())])){
+					unset($this->plugin->disabledScoreHudPlayers[strtolower($sender->getName())]);
+					$sender->sendMessage(ScoreHud::PREFIX . "§aSuccessfully enabled ScoreHud.");
+				}else{
+					$sender->sendMessage(ScoreHud::PREFIX . "§cScoreHud is already enabled for you.");
+				}
+				break;
+
+			case "off":
+				if(!isset($this->plugin->disabledScoreHudPlayers[strtolower($sender->getName())])){
+					ScoreFactory::removeScore($sender);
+
+					$this->plugin->disabledScoreHudPlayers[strtolower($sender->getName())] = 1;
+					$sender->sendMessage(ScoreHud::PREFIX . "§cSuccessfully disabled ScoreHud.");
+				}else{
+					$sender->sendMessage(ScoreHud::PREFIX . "§aScoreHud is already disabled for you.");
+				}
+				break;
+
+			case "help":
+			default:
+				$sender->sendMessage(ScoreHud::PREFIX . "§cUsage: /scorehud <on|off|about|help>");
+				break;
+		}
+
+		return false;
+	}
+}
+<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud;
+
+use JackMD\ScoreHud\libs\JackMD\ScoreFactory\ScoreFactory;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerQuitEvent;
+
+class EventListener implements Listener{
+	
+	/** @var ScoreHud */
+	private $plugin;
+	
+	/**
+	 * EventListener constructor.
+	 *
+	 * @param ScoreHud $plugin
+	 */
+	public function __construct(ScoreHud $plugin){
+		$this->plugin = $plugin;
+	}
+	
+	/**
+	 * @param PlayerQuitEvent $event
+	 */
+	public function onQuit(PlayerQuitEvent $event){
+		$player = $event->getPlayer();
+		ScoreFactory::removeScore($player);
+	}
+}<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\task;
+
+use JackMD\ScoreHud\ScoreHud;
+use pocketmine\scheduler\Task;
+
+class ScoreUpdateTask extends Task{
+
+	/** @var ScoreHud */
+	private $plugin;
+	/** @var int */
+	private $titleIndex = 0;
+
+	/**
+	 * ScoreUpdateTask constructor.
+	 *
+	 * @param ScoreHud $plugin
+	 */
+	public function __construct(ScoreHud $plugin){
+		$this->plugin = $plugin;
+		$this->titleIndex = 0;
+	}
+
+	/**
+	 * @param int $tick
+	 */
+	public function onRun(int $tick){
+		$players = $this->plugin->getServer()->getOnlinePlayers();
+
+		$dataConfig = $this->plugin->getScoreHudConfig();
+		$titles = $dataConfig->get("server-names");
+
+		if((is_null($titles)) || empty($titles) || !isset($titles)){
+			$this->plugin->getLogger()->error("Please set server-names in scorehud.yml properly.");
+			$this->plugin->getServer()->getPluginManager()->disablePlugin($this->plugin);
+
+			return;
+		}
+
+		if(!isset($titles[$this->titleIndex])){
+			$this->titleIndex = 0;
+		}
+
+		foreach($players as $player){
+			$this->plugin->addScore($player, $titles[$this->titleIndex]);
+		}
+
+		$this->titleIndex++;
+	}
+}

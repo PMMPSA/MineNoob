@@ -1,0 +1,2941 @@
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld;
+
+use czechpmdevs\multiworld\api\WorldManagementAPI;
+use czechpmdevs\multiworld\command\GameruleCommand;
+use czechpmdevs\multiworld\command\MultiWorldCommand;
+use czechpmdevs\multiworld\generator\ender\EnderGenerator;
+use czechpmdevs\multiworld\generator\nether\NetherGenerator;
+use czechpmdevs\multiworld\generator\normal\NormalGenerator;
+use czechpmdevs\multiworld\generator\skyblock\SkyBlockGenerator;
+use czechpmdevs\multiworld\generator\void\VoidGenerator;
+use czechpmdevs\multiworld\util\ConfigManager;
+use czechpmdevs\multiworld\util\FormManager;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\Command;
+use pocketmine\level\generator\GeneratorManager;
+use pocketmine\plugin\PluginBase;
+
+/**
+ * Class MultiWorld
+ * @package multiworld
+ */
+class MultiWorld extends PluginBase {
+
+    /** @var  MultiWorld $instance */
+    private static $instance;
+
+    /** @var LanguageManager $languageManager */
+    public $languageManager;
+
+    /** @var ConfigManager $configManager */
+    public $configManager;
+
+    /** @var FormManager $formManager */
+    public $formManager;
+
+    /** @var Command[] $commands */
+    public $commands = [];
+
+    public function onLoad() {
+        $start = (bool) !(self::$instance instanceof $this);
+        self::$instance = $this;
+
+        if($start) {
+            $generators = [
+                "ender" => EnderGenerator::class,
+                "void" => VoidGenerator::class,
+                "skyblock" => SkyBlockGenerator::class,
+                "nether" => NetherGenerator::class,
+                "normal_mw" => NormalGenerator::class
+            ];
+
+            foreach ($generators as $name => $class) {
+                GeneratorManager::addGenerator($class, $name, true);
+            }
+        }
+    }
+
+    /**
+     * @throws \ReflectionException
+     */
+    public function onEnable() {
+        $this->configManager = new ConfigManager($this);
+        $this->languageManager = new LanguageManager($this);
+        $this->formManager = new FormManager($this);
+
+        $this->commands = [
+            "multiworld" => $cmd = new MultiWorldCommand(),
+            "gamerule" => new GameruleCommand()
+        ];
+
+        foreach ($this->commands as $command) {
+            $this->getServer()->getCommandMap()->register("MultiWorld", $command);
+        }
+
+        $this->getServer()->getPluginManager()->registerEvents(new EventListener($this, $cmd), $this);
+    }
+
+    /**
+     * @return MultiWorld $plugin
+     */
+    public static function getInstance(): MultiWorld {
+        return self::$instance;
+    }
+
+    /**
+     * @return string $prefix
+     */
+    public static function getPrefix(): string {
+        return ConfigManager::getPrefix();
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\generator\ender;
+
+use czechpmdevs\multiworld\generator\ender\populator\EnderPilar;
+use pocketmine\block\Block;
+use pocketmine\event\player\PlayerJoinEvent;
+use pocketmine\level\ChunkManager;
+use pocketmine\level\generator\biome\Biome;
+use pocketmine\level\generator\biome\BiomeSelector;
+use pocketmine\level\generator\Generator;
+use pocketmine\level\generator\GeneratorManager;
+use pocketmine\level\generator\noise\Noise;
+use pocketmine\level\generator\noise\Simplex;
+use pocketmine\level\generator\populator\Populator;
+use pocketmine\math\Vector3 as Vector3;
+use pocketmine\utils\Random;
+
+/**
+ * Class EnderGenerator
+ * @package czechpmdevs\multiworld\Generator\ender
+ */
+class EnderGenerator extends Generator {
+
+    /** @var Populator[] */
+    private $populators = [];
+
+    /** @var ChunkManager */
+    protected $level;
+
+    /** @var Random */
+    protected $random;
+
+    private $waterHeight = 0;
+    private $emptyHeight = 32;
+    private $emptyAmplitude = 1;
+    private $density = 0.6;
+
+    /** @var Populator[] */
+    private $generationPopulators = [];
+
+    /** @var Simplex */
+    private $noiseBase;
+
+    private static $GAUSSIAN_KERNEL = null;
+    private static $SMOOTH_SIZE = 2;
+
+    /**
+     * EnderGenerator constructor.
+     * @param array $options
+     */
+    public function __construct(array $options = []) {
+        if (self::$GAUSSIAN_KERNEL === null) {
+            self::generateKernel();
+        }
+    }
+
+    private static function generateKernel() {
+        self::$GAUSSIAN_KERNEL = [];
+        $bellSize = 1 / self::$SMOOTH_SIZE;
+        $bellHeight = 2 * self::$SMOOTH_SIZE;
+        for ($sx = -self::$SMOOTH_SIZE; $sx <= self::$SMOOTH_SIZE; ++$sx) {
+            self::$GAUSSIAN_KERNEL[$sx + self::$SMOOTH_SIZE] = [];
+            for ($sz = -self::$SMOOTH_SIZE; $sz <= self::$SMOOTH_SIZE; ++$sz) {
+                $bx = $bellSize * $sx;
+                $bz = $bellSize * $sz;
+                self::$GAUSSIAN_KERNEL[$sx + self::$SMOOTH_SIZE][$sz + self::$SMOOTH_SIZE] = $bellHeight * exp(-($bx * $bx + $bz * $bz) / 2);
+            }
+        }
+    }
+
+    /**
+     * @return string
+     */
+    public function getName(): string {
+        return "ender";
+    }
+
+    /**
+     * @return int
+     */
+    public function getWaterHeight(): int {
+        return $this->waterHeight;
+    }
+
+    /**
+     * @return array
+     */
+    public function getSettings() : array {
+        return [];
+    }
+
+    /**
+     * @param ChunkManager $level
+     * @param Random $random
+     */
+    public function init(ChunkManager $level, Random $random): void {
+        $this->level = $level;
+        $this->random = $random;
+        $this->random->setSeed($this->level->getSeed());
+        $this->noiseBase = new Simplex($this->random, 4, 1 / 4, 1 / 64);
+        $this->random->setSeed($this->level->getSeed());
+        $pilar = new EnderPilar;
+        $pilar->setBaseAmount(0);
+        $pilar->setRandomAmount(0);
+        $this->populators[] = $pilar;
+    }
+
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function generateChunk(int $chunkX, int $chunkZ): void {
+        $this->random->setSeed(0xa6fe78dc ^ ($chunkX << 8) ^ $chunkZ ^ $this->level->getSeed());
+        if(class_exists(GeneratorManager::class)) {
+            $noise = $this->noiseBase->getFastNoise3D(16, 128, 16, 4, 8, 4, $chunkX * 16, 0, $chunkZ * 16);
+        }
+        else {
+            $noise = Generator::getFastNoise3D($this->noiseBase, 16, 128, 16, 4, 8, 4, $chunkX * 16, 0, $chunkZ * 16);
+        }
+
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+        for ($x = 0; $x < 16; ++$x) {
+            for ($z = 0; $z < 16; ++$z) {
+                // 9 = biome end
+                $chunk->setBiomeId($x, $z, 9);
+                for ($y = 0; $y < 128; ++$y) {
+                    $noiseValue = (abs($this->emptyHeight - $y) / $this->emptyHeight) * $this->emptyAmplitude - $noise[$x][$z][$y];
+                    $noiseValue -= 1 - $this->density;
+                    $distance = new Vector3(0, 64, 0);
+                    $distance = $distance->distance(new Vector3($chunkX * 16 + $x, ($y / 1.3), $chunkZ * 16 + $z));
+                    if ($noiseValue < 0 && $distance < 100 or $noiseValue < -0.2 && $distance > 400) {
+                        $chunk->setBlockId($x, $y, $z, Block::END_STONE);
+                    }
+                }
+            }
+        }
+        foreach ($this->generationPopulators as $populator) {
+            $populator->populate($this->level, $chunkX, $chunkZ, $this->random);
+        }
+    }
+
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function populateChunk(int $chunkX, int $chunkZ): void {
+        $this->random->setSeed(0xa6fe78dc ^ ($chunkX << 8) ^ $chunkZ ^ $this->level->getSeed());
+        foreach ($this->populators as $populator) {
+            $populator->populate($this->level, $chunkX, $chunkZ, $this->random);
+        }
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+    }
+
+    /**
+     * @return Vector3
+     */
+    public function getSpawn():Vector3 {
+        return new Vector3(48, 128, 48);
+    }
+}<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\generator\void;
+
+use pocketmine\block\Block;
+use pocketmine\level\ChunkManager;
+use pocketmine\level\generator\Generator;
+use pocketmine\math\Vector3;
+use pocketmine\utils\Random;
+
+/**
+ * Class VoidGenerator
+ * @package czechpmdevs\multiworld\generator\void
+ */
+class VoidGenerator extends Generator {
+
+    /** @var ChunkManager $level */
+    protected $level;
+
+    /** @var Random $random */
+    protected $random;
+
+    /** @var array $options */
+    private $options;
+
+
+    /**
+     * @return array
+     */
+    public function getSettings() : array {
+        return [];
+    }
+
+    /**
+     * @return string
+     */
+    public function getName() : string {
+        return "void";
+    }
+
+    /**
+     * VoidGenerator constructor.
+     *
+     * @param array $settings
+     */
+    public function __construct(array $settings = []){
+        $this->options = $settings;
+    }
+
+    /**
+     * @param ChunkManager $level
+     * @param Random       $random
+     *
+     * @return mixed|void
+     */
+    public function init(ChunkManager $level, Random $random): void {
+        $this->level = $level;
+        $this->random = $random;
+    }
+
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function generateChunk(int $chunkX, int $chunkZ): void {
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+        for($x = 0; $x < 16; ++$x) {
+            for ($z = 0; $z < 16; ++$z) {
+                for($y = 0; $y < 168; ++$y) {
+                    $spawn = $this->getSpawn();
+                    if($spawn->getX() >> 4 === $chunkX && $spawn->getZ() >> 4 === $chunkZ){
+                        $chunk->setBlockId(0, 64, 0, Block::GRASS);
+                    }
+                    else {
+                        $chunk->setBlockId($x, $y, $z, Block::AIR);
+                    }
+                }
+            }
+        }
+        $chunk->setGenerated(true);
+    }
+
+    /**
+     * @param $chunkX
+     * @param $chunkZ
+     *
+     * @return mixed|void
+     */
+    public function populateChunk(int $chunkX, int $chunkZ): void {}
+
+    /**
+     * @return Vector3
+     */
+    public function getSpawn(): Vector3 {
+        return new Vector3(256, 65, 256);
+    }
+}<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\generator\skyblock;
+
+use czechpmdevs\multiworld\generator\skyblock\populator\Island;
+use pocketmine\level\ChunkManager;
+use pocketmine\level\generator\Generator;
+use pocketmine\math\Vector3;
+use pocketmine\utils\Random;
+
+/**
+ * Class SkyBlockGenerator
+ * @package czechpmdevs\multiworld\generator\skyblock
+ */
+class SkyBlockGenerator extends Generator {
+
+    /** @var ChunkManager $level */
+    protected $level;
+
+    /** @var Random $random */
+    protected $random;
+
+    /** @var array $options */
+    private $options;
+
+    /**
+     * SkyBlockGenerator constructor.
+     * @param array $settings
+     */
+    public function __construct(array $settings = []) {
+        $this->options = $settings;
+    }
+
+    /**
+     * @param ChunkManager $level
+     * @param Random $random
+     */
+    public function init(ChunkManager $level, Random $random): void {
+        $this->level = $level;
+        $this->random = $random;
+    }
+
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function generateChunk(int $chunkX, int $chunkZ): void {
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+        for($x = 0; $x < 16; ++$x) {
+            for($z = 0; $z < 16; ++$z) {
+                for($y = 0; $y < 168; ++$y) {
+                    $chunk->setBlockId($x, $y, $z, 0);
+                }
+            }
+        }
+    }
+
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function populateChunk(int $chunkX, int $chunkZ): void {
+        if($chunkX === 16 && $chunkZ === 16) {
+            $island = new Island;
+            $island->populate($this->level, $chunkX, $chunkZ, $this->random);
+        }
+    }
+
+    /**
+     * @return string
+     */
+    public function getName(): string {
+        return "skyblock";
+    }
+
+    /**
+     * @return array
+     */
+    public function getSettings(): array {
+        return [];
+    }
+
+    /**
+     * @return Vector3
+     */
+    public function getSpawn(): Vector3 {
+        return new Vector3(256, 70, 256);
+    }
+
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\generator\nether;
+
+use czechpmdevs\multiworld\generator\nether\populator\GlowstoneSphere;
+use czechpmdevs\multiworld\generator\nether\populator\Ore;
+use czechpmdevs\multiworld\generator\nether\populator\SoulSand;
+use pocketmine\block\Block;
+use pocketmine\block\NetherQuartzOre;
+use pocketmine\level\biome\Biome;
+use pocketmine\level\ChunkManager;
+use pocketmine\level\generator\Generator;
+use pocketmine\level\generator\noise\Simplex;
+use pocketmine\level\generator\object\OreType;
+use pocketmine\level\generator\populator\Populator;
+use pocketmine\math\Vector3;
+use pocketmine\utils\Random;
+
+
+/**
+ * Edited PocketMine-MP generator (https://github.com/pmmp/PocketMine-MP/blob/master/src/pocketmine/level/generator/hell/Nether.php) for MultiWorld
+ *
+ * Features:
+ *  - Glowstone populator
+ *  - Soulsand with netherwarts generator
+ *  - Quartz ore generator
+ *  - Nether base - TODO
+ *
+ * Class NetherGenerator
+ * @package czechpmdevs\multiworld\generator\nether
+ */
+class NetherGenerator extends Generator {
+
+    /** @var Populator[] */
+    private $populators = [];
+    /** @var int */
+    private $waterHeight = 32;
+    /** @var int */
+    private $emptyHeight = 64;
+    /** @var int */
+    private $emptyAmplitude = 1;
+    /** @var float */
+    private $density = 0.5;
+
+    /** @var Populator[] */
+    private $generationPopulators = [];
+    /** @var Simplex $noiseBase */
+    private $noiseBase;
+
+    public function __construct(array $options = []){
+
+    }
+
+    /**
+     * @return string
+     */
+    public function getName(): string {
+        return "nether";
+    }
+
+    /**
+     * @return array
+     */
+    public function getSettings(): array {
+        return [];
+    }
+
+    /**
+     * @param ChunkManager $level
+     * @param Random $random
+     */
+    public function init(ChunkManager $level, Random $random) : void{
+        parent::init($level, $random);
+        $this->random->setSeed($this->level->getSeed());
+        $this->noiseBase = new Simplex($this->random, 4, 1 / 4, 1 / 64);
+        $this->random->setSeed($this->level->getSeed());
+
+        $ores = new Ore();
+        $ores->setOreTypes([
+            new OreType(new NetherQuartzOre(), 50, 14, 0, 128)
+        ]);
+        $this->populators[] = $ores;
+        $this->populators[] = new GlowstoneSphere();
+        $this->populators[] = new SoulSand();
+    }
+
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function generateChunk(int $chunkX, int $chunkZ) : void{
+        $this->random->setSeed(0xdeadbeef ^ ($chunkX << 8) ^ $chunkZ ^ $this->level->getSeed());
+
+        $noise = $this->noiseBase->getFastNoise3D(16, 128, 16, 4, 8, 4, $chunkX * 16, 0, $chunkZ * 16);
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+
+        for($x = 0; $x < 16; ++$x){
+            for($z = 0; $z < 16; ++$z){
+
+                $biome = Biome::getBiome(Biome::HELL);
+                $chunk->setBiomeId($x, $z, $biome->getId());
+
+                for($y = 0; $y < 128; ++$y){
+                    if($y === 0 or $y === 127){
+                        $chunk->setBlockId($x, $y, $z, Block::BEDROCK);
+                        continue;
+                    }
+                    if($y === 126) {
+                        $chunk->setBlockId($x, $y, $z, Block::NETHERRACK);
+                        continue;
+                    }
+                    $noiseValue = (\abs($this->emptyHeight - $y) / $this->emptyHeight) * $this->emptyAmplitude - $noise[$x][$z][$y];
+                    $noiseValue -= 1 - $this->density;
+
+                    if($noiseValue > 0){
+                        $chunk->setBlockId($x, $y, $z, Block::NETHERRACK);
+                    }elseif($y <= $this->waterHeight){
+                        $chunk->setBlockId($x, $y, $z, Block::STILL_LAVA);
+                    }
+                }
+            }
+        }
+
+        foreach($this->generationPopulators as $populator){
+            $populator->populate($this->level, $chunkX, $chunkZ, $this->random);
+        }
+    }
+
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function populateChunk(int $chunkX, int $chunkZ) : void{
+        $this->random->setSeed(0xdeadbeef ^ ($chunkX << 8) ^ $chunkZ ^ $this->level->getSeed());
+        foreach($this->populators as $populator){
+            $populator->populate($this->level, $chunkX, $chunkZ, $this->random);
+        }
+
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+        $biome = Biome::getBiome($chunk->getBiomeId(7, 7));
+        $biome->populateChunk($this->level, $chunkX, $chunkZ, $this->random);
+    }
+
+    /**
+     * @return Vector3
+     */
+    public function getSpawn() : Vector3 {
+        return new Vector3(127.5, 128, 127.5);
+    }
+}<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\generator\normal;
+
+use czechpmdevs\multiworld\generator\normal\populator\CavePopulator;
+use pocketmine\block\Block;
+use pocketmine\block\CoalOre;
+use pocketmine\block\DiamondOre;
+use pocketmine\block\Dirt;
+use pocketmine\block\GoldOre;
+use pocketmine\block\Gravel;
+use pocketmine\block\IronOre;
+use pocketmine\block\LapisOre;
+use pocketmine\block\RedstoneOre;
+use pocketmine\block\Stone;
+use pocketmine\level\biome\Biome;
+use pocketmine\level\ChunkManager;
+use pocketmine\level\generator\Generator;
+use pocketmine\level\generator\noise\Simplex;
+use pocketmine\level\generator\object\OreType;
+use pocketmine\level\generator\populator\GroundCover;
+use pocketmine\level\generator\populator\Ore;
+use pocketmine\level\generator\populator\Populator;
+use pocketmine\math\Vector3;
+use pocketmine\utils\Random;
+use function exp;
+
+class NormalGenerator extends Generator {
+
+    /** @var Populator[] */
+    private $populators = [];
+
+    /** @var Populator[] */
+    private $generationPopulators = [];
+    /** @var Simplex */
+    private $noiseBase;
+
+    /** @var BiomeSelector */
+    private $selector;
+
+    private static $GAUSSIAN_KERNEL = null;
+    private static $SMOOTH_SIZE = 2;
+
+    /**
+     * NormalGenerator constructor.
+     *
+     * @param array $options
+     *
+     * @throws \ReflectionException
+     */
+    public function __construct(array $options = []){
+        if(self::$GAUSSIAN_KERNEL === null){
+            self::generateKernel();
+        }
+    }
+
+    private static function generateKernel() : void{
+        self::$GAUSSIAN_KERNEL = [];
+
+        $bellSize = 1 / self::$SMOOTH_SIZE;
+        $bellHeight = 2 * self::$SMOOTH_SIZE;
+
+        for($sx = -self::$SMOOTH_SIZE; $sx <= self::$SMOOTH_SIZE; ++$sx){
+            self::$GAUSSIAN_KERNEL[$sx + self::$SMOOTH_SIZE] = [];
+
+            for($sz = -self::$SMOOTH_SIZE; $sz <= self::$SMOOTH_SIZE; ++$sz){
+                $bx = $bellSize * $sx;
+                $bz = $bellSize * $sz;
+                self::$GAUSSIAN_KERNEL[$sx + self::$SMOOTH_SIZE][$sz + self::$SMOOTH_SIZE] = $bellHeight * exp(-($bx * $bx + $bz * $bz) / 2);
+            }
+        }
+    }
+
+    public function getName() : string{
+        return "custom";
+    }
+
+    public function getSettings() : array{
+        return [];
+    }
+
+    private function pickBiome(int $x, int $z) : Biome{
+        $hash = $x * 2345803 ^ $z * 9236449 ^ $this->level->getSeed();
+        $hash *= $hash + 223;
+        $xNoise = $hash >> 20 & 3;
+        $zNoise = $hash >> 22 & 3;
+        if($xNoise == 3){
+            $xNoise = 1;
+        }
+        if($zNoise == 3){
+            $zNoise = 1;
+        }
+
+        return $this->selector->pickBiome($x + $xNoise - 1, $z + $zNoise - 1);
+    }
+
+    /**
+     * @param ChunkManager $level
+     * @param Random $random
+     * @throws \ReflectionException
+     */
+    public function init(ChunkManager $level, Random $random) : void{
+        parent::init($level, $random);
+        BiomeManager::registerBiomes();
+        $this->random->setSeed($this->level->getSeed());
+        $this->noiseBase = new Simplex($this->random, 4, 1 / 4, 1 / 32);
+        $this->random->setSeed($this->level->getSeed());
+        $this->selector = new BiomeSelector($this->random);
+
+        $cover = new GroundCover();
+        $this->generationPopulators[] = $cover;
+
+        //$cave = new CavePopulator();
+        //$this->generationPopulators[] = $cave;
+
+        $ores = new Ore();
+        $ores->setOreTypes([
+            new OreType(new CoalOre(), 20, 16, 0, 128),
+            new OreType(new IronOre(), 20, 8, 0, 64),
+            new OreType(new RedstoneOre(), 8, 7, 0, 16),
+            new OreType(new LapisOre(), 1, 6, 0, 32),
+            new OreType(new GoldOre(), 2, 8, 0, 32),
+            new OreType(new DiamondOre(), 1, 7, 0, 16),
+            new OreType(new Dirt(), 20, 32, 0, 128),
+            new OreType(new Gravel(), 10, 16, 0, 128),
+            new OreType(new Stone(1), 10, 16, 0, 128),
+            new OreType(new Stone(3), 10, 16, 0, 128),
+            new OreType(new Stone(5), 10, 16, 0, 128),
+
+        ]);
+        $this->populators[] = $ores;
+    }
+
+    public function generateChunk(int $chunkX, int $chunkZ) : void{
+        $this->random->setSeed(0xdeadbeef ^ ($chunkX << 8) ^ $chunkZ ^ $this->level->getSeed());
+
+        $noise = $this->noiseBase->getFastNoise3D(16, 128, 16, 4, 8, 4, $chunkX * 16, 0, $chunkZ * 16);
+
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+
+        $biomeCache = [];
+
+        for($x = 0; $x < 16; ++$x){
+            for($z = 0; $z < 16; ++$z){
+                $minSum = 0;
+                $maxSum = 0;
+                $weightSum = 0;
+
+                $biome = $this->pickBiome($chunkX * 16 + $x, $chunkZ * 16 + $z);
+                $chunk->setBiomeId($x, $z, $biome->getId());
+
+                for($sx = -self::$SMOOTH_SIZE; $sx <= self::$SMOOTH_SIZE; ++$sx){
+                    for($sz = -self::$SMOOTH_SIZE; $sz <= self::$SMOOTH_SIZE; ++$sz){
+
+                        $weight = self::$GAUSSIAN_KERNEL[$sx + self::$SMOOTH_SIZE][$sz + self::$SMOOTH_SIZE];
+
+                        if($sx === 0 and $sz === 0){
+                            $adjacent = $biome;
+                        }else{
+                            $index = ((($chunkX * 16 + $x + $sx) & 0xFFFFFFFF) << 32) | (( $chunkZ * 16 + $z + $sz) & 0xFFFFFFFF);
+                            if(isset($biomeCache[$index])){
+                                $adjacent = $biomeCache[$index];
+                            }else{
+                                $biomeCache[$index] = $adjacent = $this->pickBiome($chunkX * 16 + $x + $sx, $chunkZ * 16 + $z + $sz);
+                            }
+                        }
+
+                        $minSum += ($adjacent->getMinElevation() - 1) * $weight;
+                        $maxSum += $adjacent->getMaxElevation() * $weight;
+
+                        $weightSum += $weight;
+                    }
+                }
+
+                $minSum /= $weightSum;
+                $maxSum /= $weightSum;
+
+                $smoothHeight = ($maxSum - $minSum) / 2;
+
+                for($y = 0; $y < 128; ++$y){
+                    if($y === 0){
+                        $chunk->setBlockId($x, $y, $z, Block::BEDROCK);
+                        continue;
+                    }
+                    $noiseValue = $noise[$x][$z][$y] - 1 / $smoothHeight * ($y - $smoothHeight - $minSum);
+
+                    if($noiseValue > 0){
+                        $chunk->setBlockId($x, $y, $z, Block::STONE);
+                    }
+                    elseif($y < 63) {
+                        $chunk->setBlockId($x, $y, $z, Block::WATER);
+                    }
+                }
+            }
+        }
+
+        foreach($this->generationPopulators as $populator){
+            $populator->populate($this->level, $chunkX, $chunkZ, $this->random);
+        }
+    }
+
+    public function populateChunk(int $chunkX, int $chunkZ) : void{
+        $this->random->setSeed(0xdeadbeef ^ ($chunkX << 8) ^ $chunkZ ^ $this->level->getSeed());
+        foreach($this->populators as $populator){
+            $populator->populate($this->level, $chunkX, $chunkZ, $this->random);
+        }
+
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+        $biome = BiomeManager::getBiome($chunk->getBiomeId(7, 7));
+        $biome->populateChunk($this->level, $chunkX, $chunkZ, $this->random);
+    }
+
+    public function getSpawn() : Vector3{
+        return new Vector3(127.5, 128, 127.5);
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\util;
+
+use czechpmdevs\multiworld\MultiWorld;
+
+/**
+ * Class ConfigManager
+ * @package multiworld\Util
+ */
+class ConfigManager {
+
+    /** @var  MultiWorld */
+    public $plugin;
+
+    // prefix
+    public static $prefix;
+
+    /** @var  array $configData */
+    public $configData;
+
+    /**
+     * ConfigManager constructor.
+     * @param MultiWorld $plugin
+     */
+    public function __construct(MultiWorld $plugin) {
+        $this->plugin = $plugin;
+        $this->checkConfigUpdates();
+        $this->initConfig();
+    }
+
+    public function checkConfigUpdates() {
+        if(file_exists(self::getDataFolder() . "/config.yml")) {
+            $data = @yaml_parse_file(self::getDataFolder() . "/config.yml");
+
+            $currentVersion = "1.5";
+
+            if(isset($data["config-version"])) $configVersion = $data["config-version"];
+            else $configVersion = "1.4";
+
+            if($data["config-version"] == "1.5.0") $data["config-version"] = "1.5";
+
+            if($configVersion !== $currentVersion) {
+                $this->plugin->getLogger()->notice("Old config found, updating config...");
+                if(in_array($configVersion, ["1.4"])) {
+                    @rename(self::getDataFolder() . "/config.yml", $old = self::getDataFolder() . "/config.{$configVersion}.yml");
+                    $this->plugin->saveResource("/config.yml");
+                    $this->plugin->getLogger()->notice("Config updated! Old config can be found at $old.");
+                }
+                else {
+                    @unlink(self::getDataFolder() . "/config.yml");
+                    $this->plugin->saveResource("/config.yml");
+                    $this->plugin->getLogger()->notice("Config updated!");
+                }
+            }
+        }
+    }
+
+    /**
+     * @return void
+     */
+    public function initConfig() {
+        if(!is_dir(self::getDataFolder())) {
+            @mkdir(self::getDataFolder());
+        }
+        if(!is_dir(self::getDataFolder()."languages")) {
+            @mkdir(self::getDataFolder()."languages");
+        }
+        if(!is_file(self::getDataFolder()."/config.yml")) {
+            MultiWorld::getInstance()->saveResource("/config.yml");
+        }
+        if(!is_file(self::getDataFolder()."languages/cs_CZ.yml")) {
+          MultiWorld::getInstance()->saveResource("languages/cs_CZ.yml");
+        }
+        if(!is_file(self::getDataFolder()."languages/en_US.yml")) {
+            MultiWorld::getInstance()->saveResource("languages/en_US.yml");
+        }
+        if(!is_file(self::getDataFolder()."languages/de_DE.yml")) {
+          MultiWorld::getInstance()->saveResource("languages/de_DE.yml");
+        }
+        if(!is_file(self::getDataFolder()."languages/ja_JP.yml")) {
+            MultiWorld::getInstance()->saveResource("languages/ja_JP.yml");
+        }
+        if(!is_file(self::getDataFolder()."languages/ru_RU.yml")) {
+            MultiWorld::getInstance()->saveResource("languages/ru_RU.yml");
+        }
+        if(!is_file(self::getDataFolder()."languages/zh_CN.yml")) {
+            MultiWorld::getInstance()->saveResource("languages/zh_CN.yml");
+        }
+        if(!is_file(self::getDataFolder()."languages/ina_IND.yml")) {
+            MultiWorld::getInstance()->saveResource("languages/ina_IND.yml");
+        }
+
+        // load prefix
+        self::$prefix = MultiWorld::getInstance()->getConfig()->get("prefix")." §a";
+    }
+
+    /**
+     * @return string
+     */
+    public static function getDataFolder() {
+        return MultiWorld::getInstance()->getDataFolder();
+    }
+
+    /**
+     * @return string
+     */
+    public static function getDataPath() {
+        return MultiWorld::getInstance()->getServer()->getDataPath();
+    }
+
+    /**
+     * @return string $prefix
+     */
+    public static function getPrefix():string {
+        return is_string(self::$prefix) ? self::$prefix : "[MultiWorld]";
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\util;
+
+use czechpmdevs\multiworld\MultiWorld;
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+
+/**
+ * Class LanguageManager
+ * @package czechpmdevs\multiworld\Util
+ */
+class LanguageManager {
+
+    private const DEFAULT_LANGUAGE = 'eyJub3QtcGVybXMiOiJcdTAwYTdjWW91IGRvIG5vdCBoYXZlIHBlcm1pc3Npb24gdG8gdXNlIHRoaXMgY29tbWFuZCIsImRlZmF1bHQtdXNhZ2UiOiJcdTAwYTdjVXNhZ2U6IFx1MDBhNzdcL213IGhlbHAiLCJoZWxwIjoiXHUwMGE3Mi0tLSBTaG93aW5nIE11bHRpV29ybGQgaGVscCBwYWdlIHslMH0gb2YgeyUxfSAoXC9tdyBoZWxwIDxwYWdlPikgLS0tIiwiaGVscC0xIjoiXHUwMGE3MlwvbXcgY3JlYXRlIFx1MDBhN2ZDcmVhdGUgYSB3b3JsZCIsImhlbHAtMiI6Ilx1MDBhNzJcL213IHRlbGVwb3J0IFx1MDBhN2ZUZWxlcG9ydCB0byBhIHdvcmxkIiwiaGVscC0zIjoiXHUwMGE3MlwvbXcgbGlzdCBcdTAwYTdmIERpc3BsYXlzIGEgbGlzdCBvZiBhbGwgd29ybGRzIiwiaGVscC00IjoiXHUwMGE3MlwvbXcgPGxvYWR8dW5sb2FkPiBcdTAwYTdmTG9hZCBvciB1bmxvYWQgYSB3b3JsZCIsImhlbHAtNSI6Ilx1MDBhNzJcL213IHVwZGF0ZSBcdTAwYTdmVXBkYXRlIGxvYmJ5LCBzcGF3biBpbiBhIHdvcmxkIG9yIGNoYW5nZSB0aGUgZGVmYXVsdCB3b3JsZCIsImhlbHAtNiI6Ilx1MDBhNzJcL213IGRlbGV0ZSBcdTAwYTdmUmVtb3ZlIGEgd29ybGQiLCJoZWxwLTciOiJcdTAwYTcyXC9tdyBpbmZvIFx1MDBhN2ZEaXNwbGF5cyBpbmZvcm1hdGlvbiBhYm91dCBhIHdvcmxkIiwiaGVscC04IjoiXHUwMGE3MlwvbXcgZ2FtZXJ1bGUgXHUwMGE3Zk1hbmFnZSB0aGUgZ2FtZXJ1bGVzIG9mIGEgbGV2ZWwiLCJoZWxwLTkiOiJcdTAwYTcyXC9tdyBtYW5hZ2UgXHUwMGE3ZkRpc3BsYXlzIGZvcm0gZm9yIG1hbmFnaW5nIHdpdGggd29ybGRzIiwiaGVscC0xMCI6Ilx1MDBhNzJcL213IHJlbmFtZSBcdTAwYTdmUmVuYW1lcyB0aGUgd29ybGQiLCJjcmVhdGUtdXNhZ2UiOiJcdTAwYTdjVXNhZ2U6IFx1MDBhNzdcL213IGNyZWF0ZSA8bmFtZT4gW3NlZWRdIFtnZW5lcmF0b3JdIiwiY3JlYXRlLWV4aXN0cyI6Ilx1MDBhN2NMZXZlbCB7JTB9IGlzIGFscmVhZHkgZ2VuZXJhdGVkISIsImNyZWF0ZS1nZW5ub3RleGlzdHMiOiJcdTAwYTdjR2VuZXJhdG9yIHslMH0gbm90IGZvdW5kLiIsImNyZWF0ZS1nZW5lcmF0aW5nIjoiXHUwMGE3YUdlbmVyYXRpbmcgd29ybGQgeyUwfSIsImNyZWF0ZS1kb25lIjoid29ybGRzIHslMH0gd2FzIGdlbmVyYXRlZCB1c2luZyBzZWVkOiB7JTF9IGFuZCBnZW5lcmF0b3I6IHslMn0uIiwidGVsZXBvcnQtdXNhZ2UiOiJcdTAwYTdjVXNhZ2U6IFx1MDBhNzdcL213IHRlbGVwb3J0IDx3b3JsZD4gW3BsYXllcl0iLCJ0ZWxlcG9ydC1sZXZlbG5vdGV4aXN0cyI6Ilx1MDBhN2NXb3JsZCB7JTB9IGhhcyBub3QgYmVlbiBjcmVhdGVkIHlldC4gVHJ5IFwvbXcgY3JlYXRlIHRvIGNyZWF0ZSBhIHdvcmxkLiIsInRlbGVwb3J0LWxvYWQiOiJMb2FkaW5nIHdvcmxkIHslMH0uLi4iLCJ0ZWxlcG9ydC1kb25lLTEiOiJcdTAwYTdhWW91IHdlcmUgdGVsZXBvcnRlZCB0byB7JTB9LiIsInRlbGVwb3J0LWRvbmUtMiI6Ilx1MDBhN2FQbGF5ZXIgeyUxfSB3YXMgdGVsZXBvcnRlZCB0byB7JTB9LiIsInRlbGVwb3J0LXBsYXllcm5vdGV4aXN0cyI6Ilx1MDBhN2NQbGF5ZXIgZG9lcyBub3QgZXhpc3QuIiwibGlzdC1kb25lIjoiXHUwMGE3YVdvcmxkcyAoeyUwfSk6IiwibG9hZC11c2FnZSI6Ilx1MDBhN2NVc2FnZTogXHUwMGE3N1wvbXcgbG9hZCA8d29ybGQ+IiwibG9hZC1ub3RleGlzdHMiOiJcdTAwYTdjV29ybGQgeyUwfSBkb2VzIG5vdCBleGlzdC4iLCJsb2FkLWxvYWRlZCI6Ilx1MDBhN2NVbmFibGUgdG8gbG9hZCB0aGUgd29ybGQuIiwibG9hZC1kb25lIjoiXHUwMGE3YVdvcmxkIGxvYWRlZC4iLCJ1bmxvYWQtdXNhZ2UiOiJcdTAwYTdjVXNhZ2U6IFx1MDBhNzdcL213IHVubG9hZCA8d29ybGQ+IiwidW5sb2FkLWxldmVsbm90ZXhpc3RzIjoiXHUwMGE3Y3slMH0gZG9lcyBub3QgZXhpc3QuIiwidW5sb2FkLXVubG9hZGVkIjoiXHUwMGE3Y1VuYWJsZSB0byB1bmxvYWQgdGhlIHdvcmxkLiIsInVubG9hZC1kb25lIjoiXHUwMGE3YVdvcmxkIHVubG9hZGVkLiIsImRlbGV0ZS11c2FnZSI6Ilx1MDBhN2NVc2FnZTogXHUwMGE3N1wvbXcgZGVsZXRlIDx3b3JsZD4iLCJkZWxldGUtbGV2ZWxub3RleGlzdHMiOiJcdTAwYTdjV29ybGQgZG9lcyBub3QgZXhpc3QuIiwiZGVsZXRlLWRvbmUiOiJcdTAwYTdhV29ybGQgZGVsZXRlZC4gKHslMH0gZmlsZXMgcmVtb3ZlZC4pIiwidXBkYXRlLXVzYWdlIjoiXHUwMGE3Y1VzYWdlOiBcdTAwYTc3XC9tdyB1cGRhdGUgPG1vZDogc3Bhd258bG9iYnl8ZGVmYXVsdD4gW29wdGlvbnM6ICh3b3JsZCkgKHgpICh5KSAoeildIiwidXBkYXRlLWxldmVsbm90ZXhpc3RzIjoiXHUwMGE3Y1dvcmxkIHslMH0gZG9lcyBub3QgZXhpc3QuIiwidXBkYXRlLXNwYXduLWRvbmUiOiJcdTAwYTdhU3Bhd24gaW4gd29ybGQgeyUwfSB3YXMgY2hhbmdlZC4iLCJ1cGRhdGUtbG9iYnktZG9uZSI6Ilx1MDBhN2FMb2JieSBpbiB3b3JsZCB7JTB9IHdhcyBjaGFuZ2VkLiIsInVwZGF0ZS1kZWZhdWx0LXVzYWdlIjoiXHUwMGE3Y1VzYWdlOiBcdTAwYTc3XC9tdyB1cGRhdGUgZGVmYXVsdCA8bGV2ZWw+IiwidXBkYXRlLWRlZmF1bHQtZG9uZSI6Ilx1MDBhN2FEZWZhdWx0IHdvcmxkIHdhcyBjaGFuZ2VkIHRvIHslMH0uIiwidXBkYXRlLW5vdHN1cHBvcnRlZCI6Ilx1MDBhNzRQbGVhc2UgcnVuIHRoaXMgY29tbWFuZCBpbi1nYW1lIiwiaW5mby1sZXZlbG5vdGV4aXN0cyI6Ilx1MDBhN2N7JTB9IGRvZXMgbm90IGV4aXN0LiIsImluZm8iOiJcdTAwYTdhLS0tIHslMH0gLS0tIiwiaW5mby1uYW1lIjoiXHUwMGE3N05hbWU6IHslMH0iLCJpbmZvLWZvbGRlck5hbWUiOiJcdTAwYTc3Rm9sZGVyIG5hbWU6IHslMH0iLCJpbmZvLXBsYXllcnMiOiJcdTAwYTc3UGxheWVyIGNvdW50OiB7JTB9IiwiaW5mby1nZW5lcmF0b3IiOiJcdTAwYTc3R2VuZXJhdG9yOiB7JTB9IiwiaW5mby1zZWVkIjoiXHUwMGE3N1NlZWQ6IHslMH0iLCJpbmZvLXRpbWUiOiJcdTAwYTc3VGltZTogeyUwfSIsImdhbWVydWxlLXVzYWdlIjoiXHUwMGE3Y1VzYWdlOiBcdTAwYTc3XC9tdyBnYW1lcnVsZSA8bGlzdHxnYW1lcnVsZT4gW3RydWV8ZmFsc2VdIFtsZXZlbF0iLCJnYW1lcnVsZS1saXN0IjoiXHUwMGE3YUVkaXRhYmxlIGdhbWVydWxlczogeyUwfSIsImdhbWVydWxlLWxldmVsbm90Zm91bmQiOiJcdTAwYTdjV29ybGQgeyUwfSBub3QgZm91bmQuIiwiZ2FtZXJ1bGUtbm90ZXhpc3RzIjoiXHUwMGE3Y0dhbWVydWxlIHslMH0gZG9lcyBub3QgZXhpc3QuIiwiZ2FtZXJ1bGUtZG9uZSI6Ilx1MDBhN2FHYW1lcnVsZSB7JTB9IGluIHdvcmxkIHslMX0gd2FzIGNoYW5nZWQgdG8geyUyfS4iLCJyZW5hbWUtdXNhZ2UiOiJcdTAwYTdjVXNhZ2U6IFx1MDBhNzdcL213IHJlbmFtZSA8ZnJvbT4gPHRvPiIsInJlbmFtZS1leGlzdHMiOiJcdTAwYTdjTGV2ZWwgd2l0aCBuYW1lIHslMH0gYWxyZWFkeSBleGlzdHMuIiwicmVuYW1lLWxldmVsbm90Zm91bmQiOiJcdTAwYTdjTGV2ZWwgeyUwfSBkb2VzIG5vdCBleGlzdHMuIiwicmVuYW1lLWRvbmUiOiJcdTAwYTdhTmFtZSBvZiBsZXZlbCB7JTB9IHdhcyBjaGFuZ2VkIHRvIHslMX0uIiwiZm9ybXMtaW52YWxpZCI6Ilx1MDBhN2NJbnZhbGlkIHJlc3VsdC4ifQ==';
+
+    /** @var MultiWorld $plugin */
+    public $plugin;
+
+    /** @var bool $forceDefaultLang */
+    private static $forceDefaultLang = false;
+
+    /** @var string $defaultLang */
+    public static $defaultLang;
+
+    /** @var array $languages */
+    public static $languages = [];
+
+    /** @var array $players */
+    public static $players = [];
+
+    public function __construct(MultiWorld $plugin) {
+        $this->plugin = $plugin;
+        $this->loadLang();
+    }
+
+    public function loadLang() {
+        $config = $this->plugin->getConfig()->getAll();
+
+        self::$defaultLang = $config["lang"];
+        foreach (glob(ConfigManager::getDataFolder() . "/languages/*.yml") as $langResource) {
+            self::$languages[basename($langResource, ".yml")] = yaml_parse_file($langResource);
+        }
+
+        if(!isset(self::$languages[self::$defaultLang])) {
+            self::$languages[self::$defaultLang] = json_decode(base64_decode(self::DEFAULT_LANGUAGE), true); // it should fix bug
+        }
+
+        if(isset($config["forceDefaultLang"])) {
+            self::$forceDefaultLang = (bool)$config["forceDefaultLang"];
+        }
+    }
+
+    /**
+     * @param CommandSender $sender
+     * @param string $msg
+     * @param array $params
+     *
+     * @return string $message
+     */
+    public static function getMsg(CommandSender $sender, string $msg, array $params = []): string {
+        try {
+            $lang = self::$defaultLang;
+            if($sender instanceof Player && isset(self::$players[$sender->getName()])) {
+                $lang = self::$players[$sender->getName()];
+            }
+
+            if(empty(self::$languages[$lang]) || self::$forceDefaultLang) {
+                $lang = self::$defaultLang;
+            }
+
+            if(empty(self::$languages[$lang])) {
+                $lang = "en_US";
+            }
+
+            $message = self::$languages[$lang][$msg];
+
+            foreach ($params as $index => $param) {
+                $message = str_replace("{%$index}", $param, $message);
+            }
+
+
+        }
+        catch (\Exception $exception) {
+            MultiWorld::getInstance()->getLogger()->error("LanguageManager error: " . $exception->getMessage() . " Try remove language resources and restart the server.");
+            return "";
+        }
+
+        return $message;
+    }
+}<?php
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\util;
+
+use czechpmdevs\multiworld\api\WorldGameRulesAPI;
+use czechpmdevs\multiworld\api\WorldManagementAPI;
+use czechpmdevs\multiworld\form\CustomForm;
+use czechpmdevs\multiworld\MultiWorld;
+use pocketmine\form\Form;
+use pocketmine\Player;
+
+/**
+ * Class FormManager
+ * @package czechpmdevs\multiworld\util
+ */
+class FormManager {
+
+    public const FORM_CREATE = 0;
+    public const FORM_DELETE = 1;
+    public const FORM_GAMERULES = 2;
+    public const FORM_INFO = 3;
+    public const FORM_LOAD_UNLOAD = 4;
+    public const FORM_TELEPORT = 5;
+    public const FORM_TELEPORT_PLAYER = 6;
+    public const FORM_UPDATE = 7;
+
+    /** @var MultiWorld $plugin */
+    public $plugin;
+
+    /**
+     * FormManager constructor.
+     * @param MultiWorld $plugin
+     */
+    public function __construct(MultiWorld $plugin) {
+        $this->plugin = $plugin;
+    }
+
+    /**
+     * @param Player $player
+     * @param mixed $data
+     * @param Form $form
+     */
+    public function handleFormResponse(Player $player, $data, Form $form) {
+        if($data === null) return;
+        $customForm = new CustomForm("World Manager");
+        $customForm->mwId = $data;
+
+        switch ($data) {
+            case self::FORM_CREATE:
+                $customForm->addLabel("Create world");
+                $customForm->addInput("Level name");
+                $customForm->addInput("Level seed");
+                $customForm->addDropdown("Generator", ["Normal", "Custom", "Nether", "End", "Flat", "Void", "SkyBlock"]);
+                $player->sendForm($customForm);
+                break;
+            case self::FORM_DELETE:
+                $customForm->addLabel("Remove world");
+                $customForm->addDropdown("Level name", WorldManagementAPI::getAllLevels());
+                $player->sendForm($customForm);
+                break;
+            case self::FORM_GAMERULES:
+                $customForm->addLabel("Update level GameRules");
+                $rules = WorldGameRulesAPI::getLevelGameRules($player->getLevel());
+                foreach ($rules as $rule => [1 => $value]) {
+                    $customForm->addToggle((string)$rule, $value);
+                }
+                $player->sendForm($customForm);
+                break;
+            case self::FORM_INFO:
+                $customForm->addLabel("Get information about the level");
+                $customForm->addDropdown("Levels", WorldManagementAPI::getAllLevels());
+                $player->sendForm($customForm);
+                break;
+            case self::FORM_LOAD_UNLOAD:
+                $customForm->addLabel("Load/Unload world");
+                $customForm->addInput("Level to load §o(optional)");
+                $customForm->addInput("Level to unload §o(optional)");
+                $player->sendForm($customForm);
+                break;
+            case self::FORM_TELEPORT:
+                $customForm->addLabel("Teleport to level");
+                $customForm->addDropdown("Level", WorldManagementAPI::getAllLevels());
+                $player->sendForm($customForm);
+                break;
+            case self::FORM_TELEPORT_PLAYER:
+                $customForm->addLabel("Teleport player to level");
+                $players = [];
+                foreach ($this->plugin->getServer()->getOnlinePlayers() as $p) {
+                    $players[] = $p->getName();
+                }
+                $customForm->addDropdown("Player", $players);
+                $customForm->addDropdown("Level", WorldManagementAPI::getAllLevels());
+                $player->sendForm($customForm);
+                break;
+            case self::FORM_UPDATE:
+                $customForm->addLabel("Update level");
+                $customForm->addToggle("Update world spawn", true);
+                $customForm->addToggle("Update server lobby", false);
+                $player->sendForm($customForm);
+                break;
+        }
+    }
+
+    /**
+     * @param Player $player
+     * @param mixed $data
+     * @param CustomForm $form
+     */
+    public function handleCustomFormResponse(Player $player, $data, CustomForm $form) {
+        if($data === null) return;
+        switch ($form->mwId) {
+            case self::FORM_CREATE:
+                if($data[1] === "" || (strlen($data[2]) > 2 && !is_numeric($data[2]))) {
+                    LanguageManager::getMsg($player, "forms-invalid");
+                    break;
+                }
+                $name = (string)$data[1];
+                $seed = (int)$data[2];
+                $gen = (int)$data[3];
+                $genName = "Normal";
+                switch ($gen) {
+                    case WorldManagementAPI::GENERATOR_NORMAL:
+                        $genName = "Normal";
+                        break;
+                    case WorldManagementAPI::GENERATOR_HELL:
+                        $genName = "Hell";
+                        break;
+                    case WorldManagementAPI::GENERATOR_ENDER:
+                        $genName = "End";
+                        break;
+                    case WorldManagementAPI::GENERATOR_VOID:
+                        $genName = "Void";
+                        break;
+                    case WorldManagementAPI::GENERATOR_SKYBLOCK:
+                        $genName = "SkyBlock";
+                        break;
+                    case WorldManagementAPI::GENERATOR_HELL_OLD:
+                        $genName = "Nether_Old";
+                        break;
+                    case WorldManagementAPI::GENERATOR_NORMAL_CUSTOM:
+                        $genName = "Custom";
+                }
+                $this->plugin->getServer()->dispatchCommand($player, "mw create $name $seed $genName");
+                break;
+            case self::FORM_DELETE:
+                $this->plugin->getServer()->dispatchCommand($player, "mw delete " . WorldManagementAPI::getAllLevels()[$data[1]]);
+                break;
+            case self::FORM_GAMERULES:
+                array_shift($data);
+                $gameRules = array_keys(WorldGameRulesAPI::getLevelGameRules($player->getLevel()));
+                foreach ($data as $i => $v) {
+                    $this->plugin->getServer()->dispatchCommand($player, "gamerule {$gameRules[$i]} " . ((bool)$v ? "true" : "false"));
+                }
+                break;
+            case self::FORM_INFO:
+                $this->plugin->getServer()->dispatchCommand($player, "mw info " . WorldManagementAPI::getAllLevels()[(int)$data[1]]);
+                break;
+            case self::FORM_LOAD_UNLOAD:
+                if($data[1] != "") {
+                    $this->plugin->getServer()->dispatchCommand($player, "mw load {$data[1]}");
+                }
+                if($data[2] != "") {
+                    $this->plugin->getServer()->dispatchCommand($player, "mw unload {$data[2]}");
+                }
+                break;
+            case self::FORM_TELEPORT:
+                $this->plugin->getServer()->dispatchCommand($player, "mw tp " . WorldManagementAPI::getAllLevels()[$data[1]]);
+                break;
+            case self::FORM_TELEPORT_PLAYER:
+                $players = [];
+                foreach ($this->plugin->getServer()->getOnlinePlayers() as $p) {
+                    $players[] = $p->getName();
+                }
+                $this->plugin->getServer()->dispatchCommand($player, "mw tp " . WorldManagementAPI::getAllLevels()[$data[2]] . " " . $players[$data[1]]);
+                break;
+            case self::FORM_UPDATE:
+                array_shift($data);
+                if((bool)array_shift($data)) {
+                    $this->plugin->getServer()->dispatchCommand($player, "mw update spawn");
+                }
+                if((bool)array_shift($data)) {
+                    $this->plugin->getServer()->dispatchCommand($player, "mw update lobby");
+                }
+                break;
+
+        }
+    }
+}<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command;
+
+use czechpmdevs\multiworld\command\subcommand\CreateSubcommand;
+use czechpmdevs\multiworld\command\subcommand\DeleteSubcommand;
+use czechpmdevs\multiworld\command\subcommand\GameruleSubcommand;
+use czechpmdevs\multiworld\command\subcommand\HelpSubcommand;
+use czechpmdevs\multiworld\command\subcommand\InfoSubcommand;
+use czechpmdevs\multiworld\command\subcommand\ListSubcommand;
+use czechpmdevs\multiworld\command\subcommand\LoadSubcommand;
+use czechpmdevs\multiworld\command\subcommand\ManageSubcommand;
+use czechpmdevs\multiworld\command\subcommand\RenameSubcommand;
+use czechpmdevs\multiworld\command\subcommand\SubCommand;
+use czechpmdevs\multiworld\command\subcommand\TeleportSubcommand;
+use czechpmdevs\multiworld\command\subcommand\UnloadSubcommand;
+use czechpmdevs\multiworld\command\subcommand\UpdateSubcommand;
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\Command;
+use pocketmine\command\CommandSender;
+use pocketmine\command\PluginIdentifiableCommand;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+use pocketmine\Server;
+
+/**
+ * Class MultiWorldCommand
+ * @package czechpmdevs\multiworld\Command
+ */
+class MultiWorldCommand extends Command implements PluginIdentifiableCommand {
+
+    /** @var  MultiWorld $plugin */
+    public $plugin;
+
+    /** @var SubCommand[] $subcommands */
+    public $subcommands = [];
+
+    /**
+     * MultiWorldCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct("multiworld", "MultiWorld commands", null, ["mw"]);
+        $this->plugin = MultiWorld::getInstance();
+        $this->registerSubcommands();
+    }
+
+    public function registerSubcommands() {
+        $this->subcommands["help"] = new HelpSubcommand;
+        $this->subcommands["create"] = new CreateSubcommand;
+        $this->subcommands["teleport"] = new TeleportSubcommand;
+        $this->subcommands["list"] = new ListSubcommand;
+        $this->subcommands["load"] = new LoadSubcommand;
+        $this->subcommands["unload"] = new UnloadSubcommand;
+        $this->subcommands["delete"] = new DeleteSubcommand;
+        $this->subcommands["update"] = new UpdateSubcommand;
+        $this->subcommands["info"] = new InfoSubcommand;
+        $this->subcommands["gamerule"] = new GameruleSubcommand;
+        $this->subcommands["manage"] = new ManageSubcommand;
+        $this->subcommands["rename"] = new RenameSubcommand;
+    }
+
+    /**
+     * @param CommandSender $sender
+     * @param string $commandLabel
+     * @param array $args
+     *
+     * @return mixed|void
+     */
+    public function execute(CommandSender $sender, string $commandLabel, array $args) {
+        if(!isset($args[0])) {
+            if($sender->hasPermission("mw.cmd")) {
+                $sender->sendMessage(LanguageManager::getMsg($sender, "default-usage"));
+                return;
+            }
+            $sender->sendMessage(LanguageManager::getMsg($sender, "not-perms"));
+            return;
+        }
+
+
+        if($this->getSubcommand($args[0]) === null) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "default-usage"));
+            return;
+        }
+
+        if(!$this->checkPerms($sender, $args[0])) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "not-perms"));
+            return;
+        }
+
+        $name = $args[0];
+
+        array_shift($args);
+
+        /** @var SubCommand $subCommand */
+        $subCommand = $this->subcommands[$this->getSubcommand($name)];
+        $subCommand->executeSub($sender, $args, $this->getSubcommand($name));
+    }
+
+    /**
+     * @param string $name
+     *
+     * @return string|null $name
+     */
+    public function getSubcommand(string $name) {
+        switch ($name) {
+            case "help":
+            case "?":
+                return "help";
+            case "create":
+            case "generate":
+            case "new":
+                return "create";
+            case "tp":
+            case "teleport":
+            case "move":
+                return "teleport";
+            case "list":
+            case "ls":
+                return "list";
+            case "load":
+            case "ld":
+                return "load";
+            case "unload":
+            case "unld":
+                return "unload";
+            case "remove":
+            case "delete":
+            case "rm":
+            case "del":
+            case "dl":
+                return "delete";
+            case "update":
+            case "ue":
+                return "update";
+            case "info":
+            case "i":
+                return "info";
+            case "gamerule":
+            case "gr":
+            case "gamer":
+            case "grule":
+                return "gamerule";
+            case "manage":
+            case "mng":
+            case "mg":
+                return "manage";
+            case "rename":
+            case "rnm":
+            case "re":
+                return "rename";
+        }
+        return null;
+    }
+
+    /**
+     * @param CommandSender $sender
+     * @param string $command
+     * @return bool
+     */
+    public function checkPerms(CommandSender $sender, string $command):bool {
+        if($sender instanceof Player) {
+            if(!$sender->hasPermission("mw.cmd." . $this->getSubcommand($command))) {
+                $sender->sendMessage(LanguageManager::getMsg($sender, "not-perms"));
+                return false;
+            } else {
+                return true;
+            }
+        } else {
+            return true;
+        }
+    }
+
+
+    /**
+     * @return Server
+     */
+    public function getServer(): Server {
+        return Server::getInstance();
+    }
+
+    /**
+     * @return Plugin|MultiWorld $multiWorld
+     */
+    public function getPlugin(): Plugin {
+        return MultiWorld::getInstance();
+    }
+}<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+
+/**
+ * Class HelpSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class HelpSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     *
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if(!isset($args[0])) {
+            $sender->sendMessage($this->getHelpPage($sender, 1));
+            return;
+        }
+
+        if(!is_numeric($args[0])) {
+            $sender->sendMessage($this->getHelpPage($sender,1));
+            return;
+        }
+
+        $sender->sendMessage($this->getHelpPage($sender, (int)$args[0]));
+    }
+
+    /**
+     * @param CommandSender $sender
+     * @param int $page
+     *
+     * @return string
+     */
+    public function getHelpPage(CommandSender $sender, int $page): string {
+        $title = LanguageManager::getMsg($sender, "help", [$page, "2"]);
+
+        $text = $title;
+
+        switch ($page) {
+            default:
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-1");
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-2");
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-3");
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-4");
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-5");
+                break;
+
+            case 2:
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-6");
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-7");
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-8");
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-9");
+                $text .= "\n" . LanguageManager::getMsg($sender, "help-10");
+                break;
+        }
+        return $text;
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use pocketmine\command\CommandSender;
+
+/**
+ * Interface SubCommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+interface SubCommand {
+
+    /**
+     * @api
+     *
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     *
+     * @return mixed
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name);
+}<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\api\WorldManagementAPI;
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+
+/**
+ * Class CreateSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class CreateSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if(!isset($args[0])) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "create-usage"));
+            return;
+        }
+
+        if(MultiWorld::getInstance()->getServer()->isLevelGenerated($args[0])) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "create-exists", [$args[0]]));
+            return;
+        }
+
+        $seed = 0;
+        if(isset($args[1]) && is_numeric($args[1])) {
+            $seed = (int) $args[1];
+        }
+
+        $generatorName = "normal";
+        $generator = null;
+
+        if(isset($args[2])) {
+            $generatorName = $args[2];
+        }
+
+        switch (strtolower($generatorName)) {
+            case "normal":
+            case "classic":
+            case "basic":
+                $generator = WorldManagementAPI::GENERATOR_NORMAL;
+                $generatorName = "Normal";
+                break;
+            case "custom": // todo rename that to normal
+                $generator = WorldManagementAPI::GENERATOR_NORMAL_CUSTOM;
+                $generatorName = "Custom";
+                break;
+            case "flat":
+            case "superflat":
+                $generator = WorldManagementAPI::GENERATOR_FLAT;
+                $generatorName = "Flat";
+                break;
+            case "nether":
+            case "hell":
+                $generator = WorldManagementAPI::GENERATOR_HELL;
+                $generatorName = "Nether";
+                break;
+            case "ender":
+            case "end":
+                $generator = WorldManagementAPI::GENERATOR_ENDER;
+                $generatorName = "End";
+                break;
+            case "void":
+                $generator = WorldManagementAPI::GENERATOR_VOID;
+                $generatorName = "Void";
+                break;
+            case "skyblock":
+            case "sb":
+            case "sky":
+                $generator = WorldManagementAPI::GENERATOR_SKYBLOCK;
+                $generatorName = "SkyBlock";
+                break;
+            case "nether_old":
+                $generator = WorldManagementAPI::GENERATOR_HELL_OLD;
+                $generatorName = "Old Nether";
+                break;
+            default:
+                $generator = WorldManagementAPI::GENERATOR_NORMAL;
+                $generatorName = "Normal";
+                break;
+        }
+
+        WorldManagementAPI::generateLevel($args[0], $seed, $generator);
+        $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "create-done", [$args[0], $seed, $generatorName]));
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+use pocketmine\Server;
+
+/**
+ * Class TeleportSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class TeleportSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        try {
+            if(!isset($args[0])) {
+                $sender->sendMessage(LanguageManager::getMsg($sender, "teleport-usage"));
+                return;
+            }
+
+            if(!$this->getServer()->isLevelGenerated($args[0])) {
+                $sender->sendMessage(LanguageManager::getMsg($sender, "teleport-levelnotexists", [$args[0]]));
+                return;
+            }
+
+            if(!$this->getServer()->isLevelLoaded($args[0])) {
+                $this->getServer()->loadLevel($args[0]);
+            }
+
+            $level = $this->getServer()->getLevelByName($args[0]);
+
+            if(!isset($args[1])) {
+                if(!$sender instanceof Player) {
+                    $sender->sendMessage(MultiWorld::getPrefix().LanguageManager::getMsg($sender, "teleport-usage"));
+                    return;
+                }
+
+                $sender->teleport($level->getSafeSpawn());
+                $sender->sendMessage(MultiWorld::getPrefix().LanguageManager::getMsg($sender, "teleport-done-1", [$level->getName()]));
+                return;
+            }
+
+            $player = $this->getServer()->getPlayer($args[1]);
+
+            if((!$player instanceof Player) || !$player->isOnline()) {
+                $sender->sendMessage(MultiWorld::getPrefix().LanguageManager::getMsg($sender, "teleport-playernotexists"));
+                return;
+            }
+
+            $player->teleport($level->getSafeSpawn());
+
+            $player->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "teleport-done-1", [$level->getName()]));
+            $sender->sendMessage(LanguageManager::getMsg($sender, "teleport-done-2", [$level->getName(), $player->getName()]));
+            return;
+        }
+        catch (\Exception $exception) {
+            MultiWorld::getInstance()->getLogger()->error("An error occurred while teleporting player between worlds: " . $exception->getMessage() . " (at line: " . $exception->getLine() . " , file: ". $exception->getFile() .")");
+        }
+    }
+
+    /**
+     * @return Server $server
+     */
+    private function getServer(): Server {
+        return Server::getInstance();
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\api\WorldManagementAPI;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+
+/**
+ * Class ListSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class ListSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        $levels = [];
+
+        foreach (scandir($this->getServer()->getDataPath()."worlds") as $file) {
+            if(WorldManagementAPI::isLevelGenerated($file)) {
+                $isLoaded = WorldManagementAPI::isLevelLoaded($file);
+                $players = 0;
+
+                if($isLoaded) {
+                    $players = count($this->getServer()->getLevelByName($file)->getPlayers());
+                }
+
+                $levels[$file] = [$isLoaded, $players];
+            }
+        }
+
+
+
+        $sender->sendMessage(LanguageManager::getMsg($sender, "list-done", [(string) count($levels)]));
+
+        foreach ($levels as $level => [$loaded, $players]) {
+            $loaded = $loaded ? "§aloaded§7" : "§cunloaded§7";
+            $sender->sendMessage("§7{$level} > {$loaded} §7players: {$players}");
+        }
+    }
+
+    /**
+     * @return Server $server
+     */
+    private function getServer(): Server {
+        return Server::getInstance();
+    }
+}<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+
+/**
+ * Class LoadSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class LoadSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if (!isset($args[0])) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "load-usage"));
+            return;
+        }
+
+        if(!$this->getServer()->isLevelGenerated($args[0])) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "load-levelnotexists", [$args[0]]));
+            return;
+        }
+
+        if($this->getServer()->isLevelLoaded($args[0])) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "load-loaded"));
+            return;
+        }
+
+        $this->getServer()->loadLevel($args[0]);
+        $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "load-done"));
+        return;
+    }
+
+    /**
+     * @return Server $server
+     */
+    private function getServer(): Server {
+        return Server::getInstance();
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+
+/**
+ * Class UnloadSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class UnloadSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     *
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if (!isset($args[0])) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "unload-usage"));
+            return;
+        }
+
+        if(!$this->getServer()->isLevelGenerated($args[0])) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "unload-levelnotexists", [$args[0]]));
+            return;
+        }
+
+        if(!$this->getServer()->isLevelLoaded($args[0])) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "unload-unloaded"));
+            return;
+        }
+
+        $this->getServer()->unloadLevel($this->getServer()->getLevelByName($args[0]));
+        $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "unload-done"));
+        return;
+    }
+
+    /**
+     * @return Server $server
+     */
+    private function getServer(): Server {
+        return Server::getInstance();
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\api\WorldManagementAPI;
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+
+/**
+ * Class DeleteSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class DeleteSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     *
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if (!isset($args[0])) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "delete-usage"));
+            return;
+        }
+
+        if (!$this->getServer()->isLevelGenerated($args[0]) || !file_exists($this->getServer()->getDataPath() . "worlds/{$args[0]}")) {
+            $sender->sendMessage(MultiWorld::getPrefix() . str_replace("%1", $args[0], LanguageManager::getMsg($sender, "delete-levelnotexists")));
+            return;
+        }
+
+        if(!$this->getServer()->isLevelLoaded($args[0])) $this->getServer()->loadLevel($args[0]);
+
+        if ($this->getServer()->getDefaultLevel()->getFolderName() == $this->getServer()->getLevelByName($args[0])->getFolderName()) {
+            $sender->sendMessage("§cCould not remove default level!");
+            return;
+        }
+
+        $files = WorldManagementAPI::removeLevel($args[0]);
+        $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "delete-done", [$files]));
+    }
+
+    /**
+     * @return Server $server
+     */
+    private function getServer(): Server {
+        return Server::getInstance();
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+use pocketmine\level\Level;
+use pocketmine\level\Position;
+use pocketmine\math\Vector3;
+use pocketmine\Player;
+use pocketmine\Server;
+
+/**
+ * Class UpdateSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class UpdateSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if(!isset($args[0])) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "update-usage"));
+            return;
+        }
+
+        switch (strtolower($args[0])) {
+            case "spawn":
+                if(!isset($args[1]) && ($sender instanceof Player)) {
+                    $this->setSpawn($sender->getLevel(), $sender->asVector3());
+                    $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "update-spawn-done", [$sender->getLevel()->getName()]));
+                    break;
+                }
+
+                if(count($args) < 5 || !is_numeric($args[2]) || !is_numeric($args[3]) || !is_numeric($args[4])) {
+                    $sender->sendMessage(LanguageManager::getMsg($sender, "update-usage"));
+                    break;
+                }
+
+                if(!$this->getServer()->isLevelGenerated($args[1])) {
+                    $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "update-levelnotexists"));
+                    break;
+                }
+
+                $this->setSpawn($this->getServer()->getLevelByName($args[1]), new Vector3((int)$args[2], (int)$args[3], (int)$args[4]));
+                $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "update-done"));
+                break;
+            case "lobby":
+            case "hub":
+                if(!$sender instanceof Player) {
+                    $sender->sendMessage(LanguageManager::getMsg($sender, "update-notsupported"));
+                    break;
+                }
+                $this->setLobby($sender->asPosition());
+                $sender->sendMessage(MultiWorld::getPrefix()  . LanguageManager::getMsg($sender, "update-lobby-done", [$sender->getLevel()->getFolderName()]));
+                break;
+            case "default":
+            case "defaultlevel":
+                if(!isset($args[1])) {
+                    $sender->sendMessage(LanguageManager::getMsg($sender, "update-usage"));
+                    break;
+                }
+
+                if(!$this->getServer()->isLevelGenerated($args[1])) {
+                    $sender->sendMessage(MultiWorld::getPrefix() . str_replace("%1", $args[1], LanguageManager::getMsg($sender, "update-levelnotexists")));
+                    break;
+                }
+
+                if(!$this->getServer()->isLevelLoaded($args[1])) {
+                    $this->getServer()->loadLevel($args[1]);
+                }
+
+                $this->setDefaultLevel($this->getServer()->getLevelByName($args[1]));
+                $sender->sendMessage(MultiWorld::getPrefix() . str_replace("%1", $args[1], LanguageManager::getMsg($sender, "update-default-done")));
+                break;
+            default:
+                $sender->sendMessage(LanguageManager::getMsg($sender, "update-usage"));
+                break;
+        }
+    }
+
+    /**
+     * @param Level $level
+     * @param Vector3 $vector3
+     */
+    public function setSpawn(Level $level, Vector3 $vector3) {
+        $level->setSpawnLocation($vector3);
+    }
+
+    /**
+     * @param Position $position
+     */
+    public function setLobby(Position $position) {
+        $this->setDefaultLevel($position->getLevel());
+        $position->getLevel()->setSpawnLocation($position->asVector3());
+    }
+
+    /**
+     * @param Level $level
+     */
+    public function setDefaultLevel(Level $level) {
+        $this->getServer()->setDefaultLevel($level);
+    }
+
+    /**
+     * @return Server $server
+     */
+    private function getServer(): Server {
+        return Server::getInstance();
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\api\WorldManagementAPI;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+use pocketmine\level\Level;
+use pocketmine\Player;
+
+/**
+ * Class InfoSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class InfoSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if(!$sender instanceof Player) {
+            $sender->sendMessage("§cThis command can be used only in-game!");
+            return;
+        }
+        if(isset($args[0])) {
+            if(!WorldManagementAPI::isLevelGenerated($args[0])) {
+                $sender->sendMessage(LanguageManager::getMsg($sender, "info.levelnotexists", [$args[0]]));
+                return;
+            }
+            if(!WorldManagementAPI::isLevelLoaded($args[0])) {
+                WorldManagementAPI::loadLevel($args[0]);
+            }
+            $sender->sendMessage($this->getInfoMsg($sender, WorldManagementAPI::getLevel($args[0])));
+            return;
+        }
+        $sender->sendMessage($this->getInfoMsg($sender, $sender->getLevel()));
+    }
+
+    /**
+     * @param CommandSender $sender
+     * @param Level $level
+     * @return string
+     */
+    public function getInfoMsg(CommandSender $sender, Level $level): string {
+        $name = $level->getName();
+        $folderName = $level->getFolderName();
+        $seed = $level->getSeed();
+        $players = count($level->getPlayers());
+        $generator = $level->getProvider()->getGenerator();
+        $time = $level->getTime();
+
+        $msg = LanguageManager::getMsg($sender, "info", [$name]);
+        $msg .= "\n".LanguageManager::getMsg($sender, "info-name", [$name]);
+        $msg .= "\n".LanguageManager::getMsg($sender, "info-folderName", [$folderName]);
+        $msg .= "\n".LanguageManager::getMsg($sender, "info-players", [$players]);
+        $msg .= "\n".LanguageManager::getMsg($sender, "info-generator", [$generator]);
+        $msg .= "\n".LanguageManager::getMsg($sender, "info-seed", [$seed]);
+        $msg .= "\n".LanguageManager::getMsg($sender,"info-time", [$time]);
+
+        return $msg;
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\api\WorldGameRulesAPI;
+use czechpmdevs\multiworld\api\WorldManagementAPI;
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+
+/**
+ * Class GameruleSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class GameruleSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     *
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if(!isset($args[0])) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "gamerule-usage"));
+            return;
+        }
+
+        $all = WorldGameRulesAPI::getAllGameRules();
+
+
+        if($args[0] == "list") {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "gamerule-list", [implode(", ", $all)]));
+            return;
+        }
+
+        foreach ($all as $index => $string) {
+            $all[$index] = strtolower($string);
+        }
+
+        if(!isset($args[1])) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "gamerule-usage"));
+            return;
+        }
+
+        if(!in_array(strtolower($args[0]), $all)) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "gamerule-notexists", [$args[0]]));
+            return;
+        }
+
+        if(!in_array($args[1], ["true", "false"])) {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "gamerule-usage"));
+            return;
+        }
+
+        if(!isset($args[2])) {
+            if($sender instanceof Player) {
+                WorldGameRulesAPI::updateLevelGameRule($sender->getLevel(), WorldGameRulesAPI::getRuleFromLowerString($args[0]), $args[1] == "true");
+                $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "gamerule-done", [$args[0], $sender->getLevel()->getFolderName(), $args[1]]));
+                return;
+            }
+            else {
+                $sender->sendMessage(LanguageManager::getMsg($sender, "gamerule-usage"));
+                return;
+            }
+        }
+
+        if(!WorldManagementAPI::isLevelGenerated($args[2]) || WorldManagementAPI::getLevel($args[1]) === null) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "gamerule-levelnotfound", [$args[1]]));
+            return;
+        }
+
+        WorldGameRulesAPI::updateLevelGameRule(WorldManagementAPI::getLevel($args[1]), WorldGameRulesAPI::getRuleFromLowerString($args[0]), $args[2] == "true");
+        $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "gamerule-done", [$args[0], $args[1], $args[2]]));
+    }
+}<?php
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\form\SimpleForm;
+use pocketmine\command\CommandSender;
+use pocketmine\Player;
+
+/**
+ * Class ManageSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class ManageSubcommand implements SubCommand {
+
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if(!$sender instanceof Player) {
+            $sender->sendMessage("§cThis command can be used only in-game!");
+            return;
+        }
+
+        $form = new SimpleForm("World Manager", "Select action");
+        $form->mwId = 0;
+        $form->addButton("Create world");
+        $form->addButton("Delete world");
+        $form->addButton("Manage world GameRules");
+        $form->addButton("Get information about worlds");
+        $form->addButton("Load or unload world");
+        $form->addButton("Teleport to level");
+        $form->addButton("Teleport player to level");
+        $form->addButton("Update lobby/spawn position");
+
+        $sender->sendForm($form);
+    }
+
+}<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command\subcommand;
+
+use czechpmdevs\multiworld\api\WorldManagementAPI;
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\CommandSender;
+use pocketmine\Server;
+
+/**
+ * Class RenameSubcommand
+ * @package czechpmdevs\multiworld\command\subcommand
+ */
+class RenameSubcommand implements SubCommand {
+
+    /**
+     * @param CommandSender $sender
+     * @param array $args
+     * @param string $name
+     *
+     * @return mixed|void
+     */
+    public function executeSub(CommandSender $sender, array $args, string $name) {
+        if (!isset($args[0]) || !isset($args[1])) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "rename-usage"));
+            return;
+        }
+
+        if (WorldManagementAPI::isLevelGenerated($args[1])) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "rename-exists", $args[1]));
+            return;
+        }
+
+        if(!WorldManagementAPI::isLevelGenerated($args[0])) {
+            $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "rename-levelnotfound", $args[0]));
+            return;
+        }
+
+        if(WorldManagementAPI::isLevelLoaded($args[0])) WorldManagementAPI::unloadLevel(WorldManagementAPI::getLevel($args[0]));
+
+        if ($this->getServer()->getDefaultLevel()->getFolderName() == $args[0]) {
+            $sender->sendMessage("§cCould not rename default level!");
+            return;
+        }
+
+        WorldManagementAPI::renameLevel($args[0], $args[1]);
+        $sender->sendMessage(MultiWorld::getPrefix() . LanguageManager::getMsg($sender, "rename-done", [$args[0], $args[1]]));
+    }
+
+    /**
+     * @return Server $server
+     */
+    private function getServer(): Server {
+        return Server::getInstance();
+    }
+}
+<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld\command;
+
+use czechpmdevs\multiworld\MultiWorld;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\command\Command;
+use pocketmine\command\CommandSender;
+use pocketmine\command\PluginIdentifiableCommand;
+use pocketmine\plugin\Plugin;
+
+/**
+ * Class GameruleCommand
+ * @package czechpmdevs\multiworld\command
+ */
+class GameruleCommand extends Command implements PluginIdentifiableCommand {
+
+    /**
+     * GameruleCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct("gamerule", "Edit level gamerules", null, []);
+    }
+
+    /**
+     * @param CommandSender $sender
+     * @param string $commandLabel
+     * @param array $args
+     *
+     * @return mixed|void
+     */
+    public function execute(CommandSender $sender, string $commandLabel, array $args) {
+        if($sender->hasPermission("mw.cmd.gamerule")) {
+            /** @var MultiWorldCommand $mwCmd */
+            $mwCmd = $this->getPlugin()->commands["multiworld"];
+            $mwCmd->subcommands["gamerule"]->executeSub($sender, $args, "gamerule");
+        }
+        else {
+            $sender->sendMessage(LanguageManager::getMsg($sender, "not-perms"));
+        }
+    }
+
+
+    /**
+     * @return Plugin|MultiWorld $plugin
+     */
+    public function getPlugin(): Plugin {
+        return MultiWorld::getInstance();
+    }
+}<?php
+
+/**
+ * MultiWorld - PocketMine plugin that manages worlds.
+ * Copyright (C) 2018 - 2019  CzechPMDevs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+declare(strict_types=1);
+
+namespace czechpmdevs\multiworld;
+
+use czechpmdevs\multiworld\api\WorldGameRulesAPI;
+use czechpmdevs\multiworld\api\WorldManagementAPI;
+use czechpmdevs\multiworld\command\MultiWorldCommand;
+use czechpmdevs\multiworld\util\LanguageManager;
+use pocketmine\entity\Effect;
+use pocketmine\entity\Living;
+use pocketmine\event\block\BlockBreakEvent;
+use pocketmine\event\entity\EntityDamageByEntityEvent;
+use pocketmine\event\entity\EntityDamageEvent;
+use pocketmine\event\entity\EntityDeathEvent;
+use pocketmine\event\entity\EntityExplodeEvent;
+use pocketmine\event\entity\EntityLevelChangeEvent;
+use pocketmine\event\entity\EntityRegainHealthEvent;
+use pocketmine\event\level\LevelLoadEvent;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerDeathEvent;
+use pocketmine\event\player\PlayerJoinEvent;
+use pocketmine\event\player\PlayerRespawnEvent;
+use pocketmine\event\server\DataPacketReceiveEvent;
+use pocketmine\item\Bread;
+use pocketmine\item\Item;
+use pocketmine\level\Level;
+use pocketmine\network\mcpe\protocol\ChangeDimensionPacket;
+use pocketmine\network\mcpe\protocol\LoginPacket;
+use pocketmine\Player;
+use pocketmine\scheduler\Task;
+
+/**
+ * Class EventListener
+ * @package multiworld
+ */
+class EventListener implements Listener {
+
+    /** @var MultiWorld $plugin */
+    public $plugin;
+
+    /** @var MultiWorldCommand $cmd */
+    private $mwCommand;
+
+    /** @var Item[][][] $inventories */
+    private $inventories = [];
+
+    /** @var array $deathLevels */
+    private $deathLevels = [];
+
+    /**
+     * EventListener constructor.
+     *
+     * @param MultiWorld $plugin
+     * @param MultiWorldCommand $mwCommand
+     */
+    public function __construct(MultiWorld $plugin, MultiWorldCommand $mwCommand) {
+        $this->plugin = $plugin;
+        $this->mwCommand = $mwCommand;
+    }
+
+    /**
+     * @param PlayerJoinEvent $event
+     */
+    public function onJoin(PlayerJoinEvent $event) {
+        WorldGameRulesAPI::updateGameRules($event->getPlayer());
+    }
+
+    /**
+     * @param LevelLoadEvent $event
+     */
+    public function onLevelLoad(LevelLoadEvent $event) {
+        WorldGameRulesAPI::handleGameRuleChange($event->getLevel(), WorldGameRulesAPI::getLevelGameRules($event->getLevel()));
+    }
+
+    /**
+     * @param EntityLevelChangeEvent $event
+     */
+    public function onLevelChange(EntityLevelChangeEvent $event) {
+        $entity = $event->getEntity();
+        if($entity instanceof Player) {
+            WorldGameRulesAPI::updateGameRules($entity, $event->getTarget());
+
+            $originGenerator = $event->getOrigin()->getProvider()->getGenerator();
+            $targetGenerator = $event->getTarget()->getProvider()->getGenerator();
+
+            $getDimension = function ($generator): int {
+                switch ($generator) {
+                    case "normal":
+                    case "skyblock":
+                    case "void":
+                        return 0;
+                    case "nether":
+                        return 1;
+                    case "ender":
+                        return 2;
+                    default:
+                        return 0;
+                }
+            };
+
+            if($getDimension($originGenerator) == $getDimension($targetGenerator)) return;
+
+            $pk = new ChangeDimensionPacket();
+            $pk->dimension = $getDimension($targetGenerator);
+            $pk->position = $event->getTarget()->getSpawnLocation();
+
+            $entity->dataPacket($pk);
+        }
+    }
+
+    /**
+     * @param EntityDeathEvent $event
+     */
+    public function onEntityDeath(EntityDeathEvent $event) {
+        $entity = $event->getEntity();
+        $levelGameRules = WorldGameRulesAPI::getLevelGameRules($entity->getLevel());
+        if(isset($levelGameRules["doMobLoot"]) && !$levelGameRules["doMobLoot"][1] && !$entity instanceof Player) {
+            $event->setDrops([]);
+        }
+    }
+
+    /**
+     * @param PlayerDeathEvent $event
+     */
+    public function onPlayerDeath(PlayerDeathEvent $event) {
+        $player = $event->getPlayer();
+
+        $levelGameRules = WorldGameRulesAPI::getLevelGameRules($player->getLevel());
+        if(isset($levelGameRules["keepInventory"]) && $levelGameRules["keepInventory"][1]) {
+            $this->inventories[$player->getName()] = [$player->getInventory()->getContents(), $player->getArmorInventory()->getContents(), $player->getCursorInventory()->getContents()];
+            $event->setDrops([]);
+        }
+
+        $getDimension = function ($generator): int {
+            switch ($generator) {
+                case "normal":
+                case "skyblock":
+                case "void":
+                    return 0;
+                case "nether":
+                    return 1;
+                case "ender":
+                    return 2;
+                default:
+                    return 0;
+            }
+        };
+
+        if($getDimension($player->getLevel()->getProvider()->getGenerator()) !== 0) {
+            $player->teleport($this->plugin->getServer()->getDefaultLevel()->getSafeSpawn());
+            return;
+        }
+    }
+
+    /**
+     * @param PlayerRespawnEvent $event
+     */
+    public function onPlayerRespawn(PlayerRespawnEvent $event) {
+        $player = $event->getPlayer();
+        $levelGameRules = WorldGameRulesAPI::getLevelGameRules($player->getLevel());
+        if(isset($levelGameRules["keepInventory"]) && $levelGameRules["keepInventory"][1] && isset($this->inventories[$player->getName()])) {
+            $player->getInventory()->setContents(array_shift($this->inventories[$player->getName()]));
+            $player->getArmorInventory()->setContents(array_shift($this->inventories[$player->getName()]));
+            $player->getCursorInventory()->setContents(array_shift($this->inventories[$player->getName()]));
+        }
+    }
+
+    /**
+     * @param BlockBreakEvent $event
+     */
+    public function onBreak(BlockBreakEvent $event) {
+        $player = $event->getPlayer();
+        $levelGameRules = WorldGameRulesAPI::getLevelGameRules($player->getLevel());
+        if(isset($levelGameRules["doTileDrops"]) && !$levelGameRules["doTileDrops"][1]) {
+            $event->setDrops([]);
+        }
+    }
+
+    /**
+     * @param EntityRegainHealthEvent $event
+     */
+    public function onRegenerate(EntityRegainHealthEvent $event) {
+        $entity = $event->getEntity();
+        if(!$entity instanceof Living) return;
+        if($entity->hasEffect(Effect::REGENERATION)) return;
+
+        $levelGameRules = WorldGameRulesAPI::getLevelGameRules($entity->getLevel());
+        if(isset($levelGameRules["naturalRegeneration"]) && !$levelGameRules["naturalRegeneration"][1]) {
+            $event->setCancelled(true);
+        }
+    }
+
+    /**
+     * @param EntityDamageEvent $event
+     */
+    public function onDamage(EntityDamageEvent $event) {
+        $entity = $event->getEntity();
+
+        if(!$event instanceof EntityDamageByEntityEvent) return;
+
+        if($event->getEntity()->getLevel() instanceof Level) {
+            $levelGameRules = WorldGameRulesAPI::getLevelGameRules($entity->getLevel());
+            if(isset($levelGameRules["pvp"]) && !$levelGameRules["pvp"][1]) {
+                $event->setCancelled(true);
+            }
+        }
+    }
+
+    /**
+     * @param EntityExplodeEvent $event
+     */
+    public function onExplode(EntityExplodeEvent $event) {
+        $entity = $event->getEntity();
+
+        $levelGameRules = WorldGameRulesAPI::getLevelGameRules($entity->getLevel());
+        if(isset($levelGameRules["tntexplodes"]) && !$levelGameRules["tntexplodes"][1]) {
+            $event->setCancelled(true);
+        }
+    }
+
+
+
+    /**
+     * @param DataPacketReceiveEvent $event
+     */
+    public function onDataPacketReceive(DataPacketReceiveEvent $event) {
+        $packet = $event->getPacket();
+        if($packet instanceof LoginPacket) {
+            LanguageManager::$players[$packet->username] = $packet->locale;
+        }
+    }
+}

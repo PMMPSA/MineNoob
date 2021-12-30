@@ -1,0 +1,5414 @@
+<?php
+namespace shock95x\auctionhouse;
+
+use DateTime;
+use Exception;
+use shock95x\auctionhouse\libs\muqsit\invmenu\session\PlayerManager;
+use shock95x\auctionhouse\database\DataHolder;
+use shock95x\auctionhouse\menu\MenuHandler;
+use shock95x\auctionhouse\database\Database;
+use shock95x\auctionhouse\menu\MenuRenderer;
+use shock95x\auctionhouse\utils\Pagination;
+use shock95x\auctionhouse\utils\Settings;
+use shock95x\auctionhouse\libs\JackMD\UpdateNotifier\UpdateNotifier;
+use pocketmine\nbt\tag\CompoundTag;
+use pocketmine\Player;
+use pocketmine\plugin\PluginBase;
+use pocketmine\utils\Config;
+use pocketmine\utils\TextFormat;
+use shock95x\auctionhouse\commands\AHCommand;
+use shock95x\auctionhouse\economy\EconomyProvider;
+use shock95x\auctionhouse\economy\EconomySProvider;
+use shock95x\auctionhouse\utils\ConfigUpdater;
+use shock95x\auctionhouse\utils\Utils;
+use shock95x\auctionhouse\libs\muqsit\invmenu\InvMenu;
+use shock95x\auctionhouse\libs\muqsit\invmenu\InvMenuHandler;
+
+class AuctionHouse extends PluginBase {
+
+	/** @var EconomyProvider */
+	public $economyProvider;
+	/** @var AuctionHouse */
+	public static $instance;
+	/** @var Database */
+	private $database;
+	/** @var array */
+	private $translation = [];
+	/** @var MenuHandler */
+	private $menuHandler;
+
+	public function onLoad() {
+		$this->saveDefaultConfig();
+		UpdateNotifier::checkUpdate($this, $this->getDescription()->getName(), $this->getDescription()->getVersion());
+		ConfigUpdater::checkUpdate($this, $this->getConfig(), "config-version", 3);
+	}
+
+	public function onEnable() : void {
+		self::$instance = $this;
+		$this->saveDefaultConfig();
+		$statements = [$this->getDataFolder() . "statements/", $this->getDataFolder() . "language/"];
+		foreach ($statements as $directory) {
+			if(!is_dir($directory)) mkdir($directory);
+		}
+
+		$resources = ["statements/mysql.sql" => true, "statements/sqlite.sql" => true, "language/en_US.yml" => false, "language/ru_RU.yml" => false, "language/de_DE.yml" => false]; //todo
+		foreach ($resources as $file => $replace) {
+			$this->saveResource($file, $replace);
+		}
+
+		$defaultLang = new Config($this->getDataFolder() . "language/en_US.yml", Config::YAML);
+		ConfigUpdater::checkUpdate($this, $defaultLang, "lang-version", 1);
+
+		$this->loadLanguages();
+		if(empty($this->translation)) {
+			$this->getServer()->getLogger()->error("No language file has been found, will now disable plugin");
+			$this->getServer()->getPluginManager()->disablePlugin($this);
+			self::$instance = null;
+			return;
+		}
+		Settings::init($this->getConfig());
+
+		if(!InvMenuHandler::isRegistered()) InvMenuHandler::register($this);
+		$this->database = (new Database($this, $this->getConfig()))->connect();
+		$this->getServer()->getPluginManager()->registerEvents(new EventListener($this), $this);
+
+		if($this->getServer()->getPluginManager()->getPlugin("EconomyAPI") !== null) {
+			$this->setEconomyProvider(new EconomySProvider());
+		} else {
+			$this->economyProvider = null;
+		}
+		if($this->economyProvider == null) {
+			$this->getLogger()->notice("No economy plugin has been found, will now disable.");
+			$this->getServer()->getPluginManager()->disablePlugin($this);
+			return;
+		}
+		if($this->getServer()->getPluginManager()->getPlugin("InvCrashFix") == null) {
+			$this->getLogger()->warning("InvCrashFix is required to fix client crashes on 1.16, download it here: https://poggit.pmmp.io/ci/Muqsit/InvCrashFix");
+		}
+		$this->getServer()->getCommandMap()->register($this->getDescription()->getName(), new AHCommand($this));
+		$this->menuHandler = new MenuHandler($this);
+	}
+
+	public function onDisable() {
+		$this->database->save();
+		$this->database->close();
+	}
+
+	public function loadLanguages() {
+		foreach(glob($this->getDataFolder() . "language/*.yml") as $file) {
+			$locale = new Config($file, Config::YAML);
+			$localeCode = basename($file, ".yml");
+			$this->translation[strtolower($localeCode)] = $locale->getAll();
+			array_walk_recursive($this->translation[strtolower($localeCode)], function (&$element) {
+				$element = str_replace("&", "\xc2\xa7", $element);
+			});
+		}
+	}
+
+	/**
+	 * @return AuctionHouse
+	 */
+	public static function getInstance() : AuctionHouse {
+		return self::$instance;
+	}
+
+	/**
+	 * @return Database
+	 */
+	public function getDatabase() : Database {
+		return $this->database;
+	}
+
+	/**
+	 * @param EconomyProvider $provider
+	 */
+	public function setEconomyProvider(EconomyProvider $provider) {
+		$this->economyProvider = $provider;
+	}
+
+	/**
+	 * @return EconomyProvider
+	 */
+	public function getEconomyProvider() : EconomyProvider {
+		return $this->economyProvider;
+	}
+
+	/**
+	 * Gets messages from lang files
+	 *
+	 * @param Player|null $sender
+	 * @param $key
+	 * @param bool $return
+	 * @param bool $prefix
+	 * @return mixed|string
+	 */
+	public function getMessage(?Player $sender, $key, bool $return = false, $prefix = true) {
+		$locale = Settings::getDefaultLang();
+		if(isset($this->translation[strtolower($sender->getLocale())])) {
+			$locale = $sender->getLocale();
+		} else if(isset($this->translation[strtolower(Settings::getDefaultLang())])) {
+			$locale = Settings::getDefaultLang();
+		}
+		if(!isset($this->translation[strtolower($locale)][$key])) {
+			$this->getLogger()->warning("Key '" . $key . "' could not be found in the '" . $locale . "' language file, add this key to the language file or update the file by deleting it and restarting the server.");
+			//$sender->sendMessage(Utils::prefixMessage("Key '" . $key . "' could not be found in the '" . $locale . "'' language file, please contact the server administrator."));
+			return false;
+		}
+		$message = $prefix ? Utils::prefixMessage($this->translation[strtolower($locale)][$key]) : $this->translation[strtolower($locale)][$key];
+		if($return) return $message;
+		if($sender != null) $sender->sendMessage($message);
+		return "";
+	}
+
+	public function sendAHMenu(Player $player, int $n = 1) {
+		MenuHandler::setViewingMenu($player, MenuHandler::AUCTION_MENU);
+		$list = DataHolder::getListings();
+		if($n < 1) {
+			$size = count($list);
+			$n = $size / 45;
+			if ($size % 45 > 0) {
+				++$n;
+			}
+		}
+		$size2 = count($list);
+		$n2 = ($n - 1) * 45;
+		$n3 = ($n2 + 44 >= $size2) ? ($size2 - 1) : ($n * 45 - 1);
+		if ($n3 - $n2 + 1 < 1 && $n != 1) {
+			$this->sendAHMenu($player, 1);
+			return false;
+		}
+		$n4 = 0;
+
+		$menu = null;
+		$newMenu = false;
+		if(PlayerManager::get($player)->getCurrentMenu() == null) {
+			$menu = InvMenu::create(InvMenu::TYPE_DOUBLE_CHEST)->readonly();
+			$newMenu = true;
+		} else {
+			$menu = PlayerManager::get($player)->getCurrentMenu();
+			$menu->getInventoryForPlayer($player)->clearAll();
+		}
+		$menu->setListener([$this->menuHandler, "handleItemSelection"]);
+		$inventory = $menu->getInventoryForPlayer($player);
+
+		for($j = $n2; $j <= $n3; ++$j) {
+			++$n4;
+			if(!isset($list[$j])) return false;
+			$auction = $list[$j];
+			$item = clone $auction->getItem();
+			$endTime = (new DateTime())->diff((new DateTime())->setTimestamp($auction->getEndTime()));
+			$tag = $item->hasCompoundTag() ? $item->getNamedTag() : new CompoundTag();
+			$tag->setLong("marketId", $auction->getMarketId());
+
+			$listedItem = $this->getMessage($player, "listed-item", true, false);
+			$item->setCompoundTag($tag)->setCustomName(TextFormat::RESET . $item->getName())->setLore(str_replace(["%price%", "%seller%", "%time%"], [$auction->getPrice(true), $auction->getSeller(), ($endTime->days * 24 + $endTime->h) . ":" . $endTime->i], preg_filter('/^/', TextFormat::RESET, $listedItem)));
+
+			$inventory->addItem($item);
+		}
+		Pagination::setPage($player, $n);
+		$total = count($list);
+		$max = 0;
+		for($i = 0; $i < $total; $i += 45) $max++;
+		if($max == 0) $max = 1;
+		$p = Pagination::getPage($player);
+		MenuRenderer::setAuctionItems($player, $inventory, $p, $max, $total, count((array) DataHolder::getListingsByPlayer($player)), count((array)DataHolder::getListingsByPlayer($player, true)));
+
+		if($newMenu) $menu->send($player, $this->getMessage($player, "menu-name", true, false));
+		return true;
+	}
+
+	/**
+	 * @param Player $player
+	 * @param int $n
+	 */
+	public function sendExpired(Player $player, int $n = 1) : void {
+		MenuHandler::setViewingMenu($player, MenuHandler::EXPIRED_MENU);
+		$list = DataHolder::getListingsByPlayer($player, true);
+		if($n < 1) {
+			$size = count($list);
+			$n = $size / 45;
+			if ($size % 45 > 0) ++$n;
+		}
+		$size2 = count($list);
+		$n2 = ($n - 1) * 45;
+		$n3 = ($n2 + 44 >= $size2) ? ($size2 - 1) : ($n * 45 - 1);
+		if($n3 - $n2 + 1 < 1 && $n != 1) {
+			$this->sendExpired($player, 1);
+			return;
+		}
+		$n4 = 0;
+
+		$menu = null;
+		$newMenu = false;
+		if(PlayerManager::get($player)->getCurrentMenu() == null) {
+			$menu = InvMenu::create(InvMenu::TYPE_DOUBLE_CHEST)->readonly();
+			$newMenu = true;
+		} else {
+			$menu = PlayerManager::get($player)->getCurrentMenu();
+			$menu->getInventoryForPlayer($player)->clearAll();
+		}
+
+		$menu->setListener([$this->menuHandler, "handleExpired"]);
+		$inventory = $menu->getInventoryForPlayer($player);
+		for($j = $n2; $j <= $n3; ++$j) {
+			++$n4;
+			if(!isset($list[$j])) return;
+			$auction = $list[$j];
+			$item = clone $auction->getItem();
+			$tag = $item->hasCompoundTag() ? $item->getNamedTag() : new CompoundTag();
+			$tag->setLong("marketId", $auction->getMarketId());
+
+			$expiredItem = $this->getMessage($player, "expired-item", true, false);
+			$item->setCompoundTag($tag)->setCustomName(TextFormat::RESET . $item->getName())->setLore(str_replace(["%price%"], [$auction->getPrice(true)], preg_filter('/^/', TextFormat::RESET, $expiredItem)));
+
+			$inventory->addItem($item);
+		}
+		Pagination::setPage($player, $n);
+		$total = count($list);
+		$max = 0;
+		for($i = 0; $i < $total; $i += 45) $max++;
+		if($max == 0) $max = 1;
+		$p = Pagination::getPage($player);
+		MenuRenderer::setExpiredItems($player, $inventory, $p, $max, $total);
+
+		if($newMenu) $menu->send($player, $this->getMessage($player, "expired-menu-name", true, false));
+	}
+
+	/**
+	 * @param Player $player
+	 * @param int $n
+	 * @throws Exception
+	 */
+	public function sendListings(Player $player,  int $n = 1) : void {
+		MenuHandler::setViewingMenu($player, MenuHandler::LISTINGS_MENU);
+		$list = DataHolder::getListingsByPlayer($player);
+		if($n < 1) {
+			$size = count($list);
+			$n = $size / 45;
+			if ($size % 45 > 0) ++$n;
+		}
+		$size2 = count($list);
+		$n2 = ($n - 1) * 45;
+		$n3 = ($n2 + 44 >= $size2) ? ($size2 - 1) : ($n * 45 - 1);
+		if($n3 - $n2 + 1 < 1 && $n != 1) {
+			$this->sendListings($player,  1);
+			return;
+		}
+		$n4 = 0;
+
+		$menu = null;
+		$newMenu = false;
+		if(PlayerManager::get($player)->getCurrentMenu() == null) {
+			$menu = InvMenu::create(InvMenu::TYPE_DOUBLE_CHEST)->readonly();
+			$newMenu = true;
+		} else {
+			$menu = PlayerManager::get($player)->getCurrentMenu();
+			$menu->getInventoryForPlayer($player)->clearAll();
+			/*for($i = 0; $i < 45; ++$i) {
+				$menu->getInventory($player)>setItem($i, Item::get(Item::AIR));
+			}*/
+		}
+		$menu->setListener([$this->menuHandler, "handleListings"]);
+		$inventory = $menu->getInventoryForPlayer($player);
+		
+		for($j = $n2; $j <= $n3; ++$j) {
+			++$n4;
+			if(!isset($list[$j])) return;
+			$auction = $list[$j];
+			$item = clone $auction->getItem();
+			$tag = $item->hasCompoundTag() ? $item->getNamedTag() : new CompoundTag();
+			$tag->setLong("marketId", $auction->getMarketId());
+
+			$endTime = (new DateTime())->diff((new DateTime())->setTimestamp($auction->getEndTime()));
+
+			$listedItem = $this->getMessage($player, "your-listed-item", true, false);
+			$item->setCompoundTag($tag)->setCustomName(TextFormat::RESET . $item->getName())->setLore(str_replace(["%price%", "%time%"], [$auction->getPrice(true), ($endTime->days * 24 + $endTime->h) . ":" . $endTime->i], preg_filter('/^/', TextFormat::RESET, $listedItem)));
+
+			$inventory->addItem($item);
+		}
+		Pagination::setPage($player, $n);
+		$total = count($list);
+		$max = 0;
+		for($i = 0; $i < $total; $i += 45) $max++;
+		if($max == 0) $max = 1;
+		$p = Pagination::getPage($player);
+		MenuRenderer::setListingItems($player, $inventory, $p, $max, $total);
+		if($newMenu) $menu->send($player, $this->getMessage($player, "listings-menu-name", true, false));
+	}
+
+	/*protected function getPlayerMenu(Player $player) : InvMenu {
+	}*/
+}
+<?php
+
+declare(strict_types=1);
+
+/*
+ *  _   _           _       _       _   _       _   _  __ _
+ * | | | |         | |     | |     | \ | |     | | (_)/ _(_)
+ * | | | |_ __   __| | __ _| |_ ___|  \| | ___ | |_ _| |_ _  ___ _ __
+ * | | | | '_ \ / _` |/ _` | __/ _ \ . ` |/ _ \| __| |  _| |/ _ \ '__|
+ * | |_| | |_) | (_| | (_| | ||  __/ |\  | (_) | |_| | | | |  __/ |
+ *  \___/| .__/ \__,_|\__,_|\__\___\_| \_/\___/ \__|_|_| |_|\___|_|
+ *       | |
+ *       |_|
+ *
+ * UpdateNotifier, a updater virion for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ *
+ * UpdateNotifier is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace shock95x\auctionhouse\libs\JackMD\UpdateNotifier;
+
+use shock95x\auctionhouse\libs\JackMD\UpdateNotifier\task\UpdateNotifyTask;
+use pocketmine\plugin\Plugin;
+use pocketmine\Server;
+
+class UpdateNotifier{
+
+	/**
+	 * Submits an async task which then checks if a new version for the plugin is available.
+	 * If an update is available then it would print a message on the console.
+	 *
+	 * @param Plugin|null $plugin
+	 * @param string $pluginName
+	 * @param string $pluginVersion
+	 */
+	public static function checkUpdate(?Plugin $plugin, string $pluginName, string $pluginVersion){
+		Server::getInstance()->getAsyncPool()->submitTask(new UpdateNotifyTask($pluginName, $pluginVersion));
+	}
+}<?php
+
+declare(strict_types=1);
+
+/*
+ *  _   _           _       _       _   _       _   _  __ _
+ * | | | |         | |     | |     | \ | |     | | (_)/ _(_)
+ * | | | |_ __   __| | __ _| |_ ___|  \| | ___ | |_ _| |_ _  ___ _ __
+ * | | | | '_ \ / _` |/ _` | __/ _ \ . ` |/ _ \| __| |  _| |/ _ \ '__|
+ * | |_| | |_) | (_| | (_| | ||  __/ |\  | (_) | |_| | | | |  __/ |
+ *  \___/| .__/ \__,_|\__,_|\__\___\_| \_/\___/ \__|_|_| |_|\___|_|
+ *       | |
+ *       |_|
+ *
+ * UpdateNotifier, a updater virion for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ *
+ * UpdateNotifier is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace shock95x\auctionhouse\libs\JackMD\UpdateNotifier\task;
+
+use pocketmine\scheduler\AsyncTask;
+use pocketmine\Server;
+use pocketmine\utils\Internet;
+use function json_decode;
+use function version_compare;
+use function vsprintf;
+
+class UpdateNotifyTask extends AsyncTask{
+
+	/** @var string */
+	private const POGGIT_RELEASES_URL = "https://poggit.pmmp.io/releases.json?name=";
+
+	/** @var string */
+	private $pluginName;
+	/** @var string */
+	private $pluginVersion;
+
+	public function __construct(string $pluginName, string $pluginVersion){
+		$this->pluginName = $pluginName;
+		$this->pluginVersion = $pluginVersion;
+	}
+
+	public function onRun() : void{
+		$json = Internet::getURL(self::POGGIT_RELEASES_URL . $this->pluginName, 10, [], $err);
+		$highestVersion = $this->pluginVersion;
+		$artifactUrl = "";
+		$api = "";
+		if($json !== false){
+			$releases = json_decode($json, true);
+			foreach($releases as $release){
+				if(version_compare($highestVersion, $release["version"], ">=")){
+					continue;
+				}
+				$highestVersion = $release["version"];
+				$artifactUrl = $release["artifact_url"];
+				$api = $release["api"][0]["from"] . " - " . $release["api"][0]["to"];
+			}
+		}
+
+		$this->setResult([$highestVersion, $artifactUrl, $api, $err]);
+	}
+
+	public function onCompletion(Server $server) : void{
+		$plugin = Server::getInstance()->getPluginManager()->getPlugin($this->pluginName);
+		if($plugin === null){
+			return;
+		}
+
+		[$highestVersion, $artifactUrl, $api, $err] = $this->getResult();
+		if($err !== null){
+			$plugin->getLogger()->error("Update notify error: " . $err);
+		}
+
+		if($highestVersion !== $this->pluginVersion){
+			$artifactUrl = $artifactUrl . "/" . $this->pluginName . "_" . $highestVersion . ".phar";
+			$plugin->getLogger()->notice(vsprintf("Version %s has been released for API %s. Download the new release at %s", [$highestVersion, $api, $artifactUrl]));
+		}
+	}
+}<?php
+declare(strict_types = 1);
+
+/**
+ *  _____              __ _       _   _           _       _
+ * /  __ \            / _(_)     | | | |         | |     | |
+ * | /  \/ ___  _ __ | |_ _  __ _| | | |_ __   __| | __ _| |_ ___ _ __
+ * | |    / _ \| '_ \|  _| |/ _` | | | | '_ \ / _` |/ _` | __/ _ \ '__|
+ * | \__/\ (_) | | | | | | | (_| | |_| | |_) | (_| | (_| | ||  __/ |
+ *  \____/\___/|_| |_|_| |_|\__, |\___/| .__/ \__,_|\__,_|\__\___|_|
+ *                           __/ |     | |
+ *                          |___/      |_|
+ *
+ * ConfigUpdater, a updater virion for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ *
+ * ConfigUpdater is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+///////////////////////////////////////////////////////////////////////
+///                                                                 ///
+/// This is a slightly modified version of ConfigUpdater by JackMD. ///
+///             https://github.com/JackMD/ConfigUpdater             ///
+///                                                                 ///
+///////////////////////////////////////////////////////////////////////
+
+namespace shock95x\auctionhouse\utils;
+
+use pocketmine\Server;
+use pocketmine\plugin\Plugin;
+use pocketmine\scheduler\ClosureTask;
+use pocketmine\utils\Config;
+
+class ConfigUpdater{
+
+	/**
+	 * @param Plugin $plugin        The plugin you are calling this from.
+	 * @param Config $config        The config you want to update.
+	 * @param string $configKey     The version key that needs to be checked in the config.
+	 * @param int    $latestVersion The latest version of the config. Needs to be integer.
+	 * @param string $updateMessage The update message that would be shown on console if the plugin is outdated.
+	 * @throws \ReflectionException
+	 */
+	public static function checkUpdate(Plugin $plugin, Config $config, string $configKey, int $latestVersion, string $updateMessage = ""): void{
+		if(($config->exists($configKey)) && ((int) $config->get($configKey) === $latestVersion)){
+			return;
+		}
+
+		$configData = self::getConfigData($config, $plugin);
+		$configPath = $configData["configPath"];
+		$pluginPath = $configData["pluginPath"];
+		$originalConfig = $configData["configName"];
+		$oldConfig = $configData["oldConfigName"];
+
+		if(trim($updateMessage) === ""){
+			$updateMessage = "Your $originalConfig file is outdated. Your old $originalConfig has been saved as $oldConfig and a new $originalConfig file has been generated. Please update accordingly.";
+		}
+
+		rename($configPath . $originalConfig, $configPath . $oldConfig);
+
+		self::saveFile($plugin, $pluginPath, $configPath, $originalConfig);
+
+		$task = new ClosureTask(function(int $currentTick) use ($plugin, $updateMessage): void{
+			$plugin->getLogger()->critical($updateMessage);
+		});
+
+		/* This task is here so that the update message can be sent after full server load */
+		$plugin->getScheduler()->scheduleDelayedTask($task, 3 * 20);
+	}
+
+	/**
+	 * Pretty self explanatory I guess...
+	 *
+	 * @param Config $config
+	 * @param Plugin $plugin
+	 * @return array
+	 * @throws \ReflectionException
+	 */
+	private static function getConfigData(Config $config, Plugin $plugin): array{
+		$configPath = self::getConfigPath($config);
+		//$configData = explode(".", basename($configPath));
+
+		$configName = str_replace($plugin->getDataFolder(), "", $configPath);
+		$originalConfigName = $configName;
+
+		$oldConfigName = $originalConfigName . ".old";
+
+		$configPath = str_replace($originalConfigName, "", $configPath);
+		$pluginPath = str_replace("plugin_data", "plugins", $configPath);
+
+		return [
+			"configPath"    => $configPath,
+			"pluginPath"    => $pluginPath,
+			"configName"    => $originalConfigName,
+			"oldConfigName" => $oldConfigName
+		];
+	}
+
+	/**
+	 * This function is here until PM adds the function to get file path.
+	 *
+	 * @param Config $config
+	 * @return string
+	 * @throws \ReflectionException
+	 */
+	private static function getConfigPath(Config $config): string{
+		$pathReflection = new \ReflectionProperty(Config::class, 'file');
+		$pathReflection->setAccessible(true);
+
+		return $pathReflection->getValue($config);
+	}
+
+	/**
+	 * Taken from pocketmine\plugin\PluginBase::saveResource().
+	 * Edited to be used for this virion.
+	 *
+	 * @param Plugin $plugin
+	 * @param string $pluginPath
+	 * @param string $outPath
+	 * @param string $configName
+	 * @return bool
+	 */
+	private static function saveFile(Plugin $plugin, string $pluginPath, string $outPath, string $configName): bool{
+		return $plugin->saveResource($configName, true);
+	}
+}-- #!mysql
+-- #{ auctionhouse
+
+-- #  { init
+CREATE TABLE IF NOT EXISTS auctions(
+    uuid VARCHAR,
+    username VARCHAR,
+    price INT,
+    nbt BLOB,
+    end_time INT,
+    expired BOOLEAN DEFAULT FALSE,
+    id INT PRIMARY KEY);
+-- #  }
+
+-- # { fetch
+
+-- #    { all
+SELECT * FROM auctions;
+-- #    }
+-- #  }
+
+-- # { delete
+-- #    :id string
+DELETE FROM auctions
+WHERE id = :id;
+-- # }
+
+-- # { insert
+-- #    :uuid string
+-- #    :username string
+-- #    :price int
+-- #    :nbt string
+-- #    :id int
+-- #    :end_time int
+-- #    :expired bool
+REPLACE INTO auctions(uuid, username, price, nbt, id, end_time, expired) VALUES (:uuid, :username, :price, :nbt, :id, :end_time, :expired)
+-- # }
+
+-- # }-- #!sqlite
+-- #{ auctionhouse
+
+-- #  { init
+CREATE TABLE IF NOT EXISTS auctions(
+    uuid VARCHAR,
+    username VARCHAR,
+    price INT,
+    nbt BLOB,
+    end_time INT,
+    expired BOOLEAN DEFAULT FALSE,
+    id INT PRIMARY KEY);
+-- #  }
+
+-- # { fetch
+
+-- #    { all
+SELECT * FROM auctions;
+-- #    }
+-- #  }
+
+-- # { delete
+-- #    :id string
+DELETE FROM auctions
+WHERE id = :id;
+-- # }
+
+-- # { insert
+-- #    :uuid string
+-- #    :username string
+-- #    :price int
+-- #    :nbt string
+-- #    :id int
+-- #    :end_time int
+-- #    :expired bool
+INSERT OR REPLACE INTO auctions(uuid, username, price, nbt, id, end_time, expired) VALUES (:uuid, :username, :price, :nbt, :id, :end_time, :expired);
+-- # }
+
+-- # }---
+# DO NOT EDIT THIS VALUE, INTERNAL USE ONLY. #
+lang-version: 1
+
+# Refer to https://minecraft.gamepedia.com/Formatting_codes for formatting codes, you can replace the '§' symbol with a '&'
+
+# The titles of the Auction House UI
+menu-name: "&l&6Auction House"
+listings-menu-name: "&6Active Listings"
+expired-menu-name: "&6Cancelled / Expired Listings"
+purchase-menu-name: "Confirm Purchase"
+
+# Chat messages
+item-purchased: "&eItem &6purchased&e!"
+buyer-purchased: "&6%buyer% &epurchased your auction for &6$%price%&e!"
+item-listed: "&2You have listed &d@item &r&d(x@amount) &2for &d@price. Type &e/ah listings &dto view all your listings"
+cancelled-item: "&eYou have &6cancelled &ean auction. Return cancelled and expired items at &6/ah expired&e."
+cancelled-purchase: "&cYou have cancelled this purchase"
+admin-removed: "&eListing removed."
+purchased-item: "&2You have bought &d@item &r&d(x@amount) &2for &d@price"               #@player, @item, @price, @amount
+seller-message: "&e@player &bpurchased @item (x@amount) from you for &d@price!"         #@player, @item, @price, @amount
+returned-item: "&2You have removed &d@item &r&d(x@amount) &2from the auction house."                     #@item, @amount
+
+# Error messages
+in-creative: "&cYou cannot sell items while in creative mode."
+max-listings: "&cYou cannot have more than 45 active listings."
+invalid-price: "&cInvalid price."
+no_empty: "&cYour inventory is empty."
+not-enough-space: "Not enough inventory space"
+self-purchase: "&cYou cannot buy your own items on the auction house!"
+item-gone: "This item no longer exists"
+no-item: "&cYou must be holding an item in your hand!"
+cannot-afford: "&6You do not have enough money to buy this item."
+item-blacklisted: "&cThat item is not allowed to be put on the auction house!"
+invalid-balance: "&cYou do not have enough money to list an auction."
+listing-gone: "&cThis listing no longer exists."
+price-range: "&cInvalid price range"                                                                         #@min, @max
+
+# Items in the menu UI
+listed-item:
+    # %price% = Price of listing
+    # %seller% = Username of seller
+    # %time% = Time until listing expires
+    - "&7-------------------------"
+    - "&aClick here to purchase."
+    - ""
+    - "&9Price: &e%price%"
+    - "&9Seller: &e%seller%"
+    - "&9Expire: &e%time%"
+    - "&7-------------------------"
+your-listed-item:
+    # %price% = Price of listing
+    # %time% = Time until listing expires
+    - "&7-------------------------"
+    - "&cClick here to remove listing."
+    - ""
+    - "&9Price: &e%price%"
+    - "&9Expire: &e%time%"
+    - "&7-------------------------"
+expired-item:
+    # %price% = Price of listing
+    - "&7-------------------------"
+    - "&aClick here to receive item."
+    - ""
+    - ""
+    - "&9Price: &e%price%"
+    - "&7-------------------------"
+view-listed-items:
+    # %selling% = Number of active listings
+    id: 264
+    name: "&6Items you're selling"
+    lore:
+        - "&aClick here to view all of the items you"
+        - "&aare currently selling on the auction."
+        - ""
+        - "&9Selling: &e%selling%"
+view-expired-items:
+    # %expired% = Number of expired listings
+    id: 394
+    name: "&6Collect Expired / Cancelled Items"
+    lore:
+      - "&r&aClick here to view and collect all of the"
+      - "&aitems you have cancelled or have expired."
+      - ""
+      - "&9Items to collect: &e%expired%"
+previous-page:
+    id: "339"
+    name: "&a<- Previous Page"
+    lore:
+        - "Go to the previous page"
+next-page:
+    id: "339"
+    name: "&aNext Page ->"
+    lore:
+        - "Go to the next page"
+back-button:
+    id: "339"
+    name: "&6Back"
+    lore:
+sell-description:
+    id: "388"
+    name: "&6How to sell an item"
+    lore:
+        - "&aTo list an item on the auction house, just hold"
+        - "&athe item in your hand and type &b/ah sell <price>&a."
+main-description:
+    id: "340"
+    name: "&6What is this page?"
+    lore:
+        - "&aThis is the auction house, here you can"
+        - "&alist items for sale and purchase items"
+        - "&athat others have listed for sale."
+        - ""
+        - "&aThe auction is also a great way to make"
+        - "&amoney by selling farmable items other"
+        - "&aplayers may be interested in buying."
+main-stats:
+    # %page% = Current page
+    # %max% = Max page
+    # %total% = Total listing count
+    id: "54"
+    name: "&l&6Auction House"
+    lore:
+        - "&aPage %page%/%max%"
+        - "&7Total of &b%total% &7items"
+        - "Click to refresh page"
+listings-description:
+    id: "340"
+    name: "&6What is this Page?"
+    lore:
+        - "&aThese are your current listings, all of"
+        - "&athe items you currently have listed on"
+        - "&athe auction house are displayed here."
+        - ""
+        - "&aYou can cancel and view your listing's"
+        - "&aexpire time here."
+listings-stats:
+    # %page% = Current page
+    # %max% = Max page
+    # %total% = Total listing count
+    id: "54"
+    name: "&l&6Listings"
+    lore:
+        - "&aPage %page%/%max%"
+        - "&7Total of &b%total% &7items"
+expired-description:
+    id: "340"
+    name: "&6What is this page?"
+    lore:
+        - "&aThis page houses all of your cancelled and"
+        - "&aexpired items, when a listings is cancelled"
+        - "&aor expires you will be able to return that"
+        - "&aitem back to you from this menu."
+        - ""
+        - "&aJust click on the item and if you have enough"
+        - "&ainventory space you will receive the item."
+expired-stats:
+    # %page% = Current page
+    # %max% = Max page
+    # %total% = Total listing count
+    id: "152"
+    name: "&l&6Expired"
+    lore:
+        - "&aPage %page%/%max%"
+        - "&7Total of &b%total% &7items"
+purchase-confirm:
+    name: "&aConfirm Purchase"
+purchase-cancel:
+    name: "&cCancel Purchase"
+purchaseItem:
+    lore:
+        - ""
+        - "&9Price: &e$%price%"
+        - "&9Seller: &e%seller%"
+...---
+# Refer to https://minecraft.gamepedia.com/Formatting_codes for formatting codes, you can replace the '§' symbol with a '&'
+
+# The titles of the Auction House UI
+menu-name: "&l&6Аукционный дом"
+listings-menu-name: "&6Активные списки"
+expired-menu-name: "&6Отменен / Истекшие списки"
+purchase-menu-name: "Подтвердите покупку"
+
+# Chat messages
+item-purchased: "&eТовар Куплен&e!"
+buyer-purchased: "&6%покупатель% &eприобрёл ваш предмет за &6$%price%&e!"
+item-listed: "&2Вы перечислили &d@item &r&d(x@amount) &2за &d@price. Тип &e/ah listings &dпросмотреть все ваши аукционы"
+cancelled-item: "&eВы &6Отменили &eаукцион. Возврат отмененных и просроченных товаров по адресу &6/ah expired&e."
+cancelled-purchase: "&cВы отменили эту покупку"
+admin-removed: "&eСписок удален."
+purchased-item: "&2Вы купили &d@item &r&d(x@amount) &2за &d@price"               #@player, @item, @price, @amount
+seller-message: "&e@Игрок приобрел @item (x@amount) ваш предмет за &d@price!"         #@player, @item, @price, @amount
+returned-item: "&2Вы удалили &d@item &r&d(x@amount) &2 из аукционного дома."                     #@item, @amount
+
+# Error messages
+in-creative: "&cВы не можете продавать предметы в творческом режиме."
+max-listings: "&cВы не можете иметь более 45 активных аукционов."
+invalid-price: "&cНеверная цена."
+no_empty: "&cВаш инвентарь пуст."
+not-enough-space: "Недостаточно места в инвентаре"
+self-purchase: "&cВы не можете купить свои собственные вещи на аукционе!"
+item-gone: "Этого предмета больше не существует"
+no-item: "&cВы должны держать предмет в руке!"
+cannot-afford: "&6У вас недостаточно денег, чтобы купить этот предмет."
+item-blacklisted: "&cЭтот предмет не может быть выставлен на аукцион!"
+invalid-balance: "&cУ вас недостаточно денег, чтобы выставить предмет на аукцион."
+listing-gone: "&cЭтого списка больше не существует."
+
+# Items in the menu UI
+listed-item:
+    # %price% = Цена листинга
+    # %seller% = Имя продавца
+    # %time% = Время до истечения срока листинга
+    - "&7-------------------------"
+    - "&aНажмите здесь, чтобы купить."
+    - ""
+    - "&9Цена: &e$%price%"
+    - "&9Продавец: &e%seller%"
+    - "&9Истекать: &e%time%"
+    - "&7-------------------------"
+your-listed-item:
+    # %price% = Цена аукциона
+    # %time% = Время до истечения срока аукциона
+    - "&7-------------------------"
+    - "&cНажмите здесь, чтобы отменить."
+    - ""
+    - "&9Цена: &e$%price%"
+    - "&9Истекает: &e%time%"
+    - "&7-------------------------"
+view-listed-items:
+    # %selling% = Количество активных аукционов
+    id: 264
+    name: "&6Предметы, которые вы продаете"
+    lore:
+        - "&aНажмите здесь, чтобы просмотреть все предметы, которые вы"
+        - "&aв данный момент продаете на аукционе."
+        - ""
+        - "&9Продажа: &e%selling%"
+view-expired-items:
+    # %expired% = Количество истекших аукционов
+    id: 394
+    name: "&6Собрать просроченные / отмененные предметы"
+    lore:
+      - "&r&aНажмите здесь, чтобы просмотреть и собрать все"
+      - "&aЭлементы, которые вы отменили или просрочели."
+      - ""
+      - "&9Предметы для сбора: &e%expired%"
+previous-page:
+    id: "339"
+    name: "&a<- Предыдущая страница"
+    lore:
+        - "Перейти на предыдущую страницу"
+next-page:
+    id: "339"
+    name: "&aСледующая Страница ->"
+    lore:
+        - "Перейти на следующую страницу"
+back-button:
+    id: "339"
+    name: "&6Назад"
+    lore:
+sell-description:
+    id: "388"
+    name: "&6Как продать предмет"
+    lore:
+        - "&aЧтобы выставить предмет на аукцион, просто удерживайте"
+        - "&aпредмет в вашей руке и введите &b/ah sell <цена>&a."
+main-description:
+    id: "340"
+    name: "&6Что это за страница?"
+    lore:
+        - "&aЭто аукционный дом, здесь можно"
+        - "&aсписок предметов для продажи и покупки предметов"
+        - "&aчто другие выставили на продажу."
+        - ""
+        - "&aАукцион также отличный способ сделать"
+        - "&aденьги от продажи других товаров"
+        - "&aигроки могут быть заинтересованы в покупке."
+main-stats:
+    # %page% = Текущая страница
+    # %max% = Макс страница
+    # %total% = Общее количество товаров
+    id: "54"
+    name: "&l&6Аукционный дом"
+    lore:
+        - "&aСтраница %page%/%max%"
+        - "&7Всего &b%total% &7предметов"
+        - "Нажмите, чтобы обновить страницу"
+listings-description:
+    id: "340"
+    name: "&6Что это за страница?"
+    lore:
+        - "&aЭто ваши текущие списки, все"
+        - "&aпредметы, которые вы сейчас перечислили на"
+        - "&aаукционный дом отображаются здесь."
+        - ""
+        - "&aВы можете отменить и просмотреть свои списки"
+        - "&aистекает время здесь."
+listings-stats:
+    # %page% = Текущая страница
+    # %max% = Последняя страница
+    # %total% = Общее количество объявлений
+    id: "54"
+    name: "&l&6Объявления"
+    lore:
+        - "&aСтраница %page%/%max%"
+        - "&7Всего &b%total% &7предметов"
+expired-description:
+    id: "340"
+    name: "&6Что это за страница?"
+    lore:
+        - "&aЭта страница содержит все ваши отмененные"
+        - "&aпредметы с истекшим сроком, когда список отменен"
+        - "&aили истек срок действия, вы можете нажать возврат, что бы"
+        - "&aвернуться назад из этого меню."
+        - ""
+        - "&aПросто нажмите на элемент, и если у вас достаточно"
+        - "&aв инвентаре вы получите предмет."
+expired-stats:
+    # %page% = Текущая страница
+    # %max% = Последняя страница
+    # %total% = Общее количество предметов
+    id: "152"
+    name: "&l&6Истекший"
+    lore:
+        - "&aСтраница %page%/%max%"
+        - "&7Всего &b%total% &7предметов"
+purchase-confirm:
+    name: "&aПодтвердите покупку"
+purchase-cancel:
+    name: "&cОтменить покупку"
+purchaseItem:
+    lore:
+        - ""
+        - "&9Цена: &e$%price%"
+        - "&9Продавец: &e%seller%"
+...---
+# Refer to https://minecraft.gamepedia.com/Formatting_codes for formatting codes, you can replace the '§' symbol with a '&'
+
+# The titles of the Auction House UI
+menu-name: "&l&6VerkaufsHaus"
+listings-menu-name: "&6Active Angebote"
+expired-menu-name: "&6Ausgelaufende/Abgebrochende Angebote"
+purchase-menu-name: "Kauf ausführen"
+
+# Chat messages
+item-purchased: "&eItem &6gekauft&e!"
+buyer-purchased: "&6%buyer% &eHat ein Angebot für &6$%price%&e Gekauft&e!"
+item-listed: "&2Du Bietest nun: &d@item &r&d(x@amount) &2für &d@price. Mit: /ah listings kannst du deine Angebote sehen"
+cancelled-item: "&eDu hast die auktion &6abbgerochen&e.Hole dir Ausgelaufende Items und Abbgebrochende Angebot Items bei:&6/ah expired&e."
+cancelled-purchase: "&cDu hasst den Kauf abgebrochen!"
+admin-removed: "&eAngebot entfernt."
+purchased-item: "&2Du hast &d@item &r&d(x@amount) &2für &d@price Gekauft"               #@player, @item, @price, @amount
+seller-message: "&e@player &bhat @item (x@amount) von dir für &d@price Gekauft!"         #@player, @item, @price, @amount
+returned-item: "&2Du hasst &d@item &r&d(x@amount) &2zurückgezogen."                     #@item, @amount
+
+# Error messages
+in-creative: "&cDu kannst nur sachen im survival modus Verkaufen &6[/gamemode 0]."
+max-listings: "&cDu kannst nicht mehr wie 45 Angebote haben."
+invalid-price: "&cFalscher Preis."
+no_empty: "&cDein Inventar ist Leer."
+not-enough-space: "Du hasst kein platzt in deinen Inventar"
+self-purchase: "&cDu kannst nicht deine eigenen Angebote Kaufen!"
+item-gone: "Dieses Item exestiert nicht mehr"
+no-item: "&cDu musst ein Item in deiner Hand halten!"
+cannot-afford: "&6Du hast nicht genug Geld um dir das zu Kaufen."
+item-blacklisted: "&cDas Item darfst du nicht verkaufen!"
+invalid-balance: "&cDu hasst nicht genug geld um das Item zum Verkauf Anzubieten."
+listing-gone: "&cDas Angebot Exestiert nichtmehr."
+price-range: "&cZu großer/zu kleiner Preis"                                                                         #@min, @max
+
+# Items in the menu UI
+listed-item:
+    # %price% = Price of listing
+    # %seller% = Username of seller
+    # %time% = Time until listing expires
+    - "&7-------------------------"
+    - "&aKlicke hier um es zu Kaufen."
+    - ""
+    - "&9Preis: &e%price%"
+    - "&9Verkäufer: &e%seller%"
+    - "&9Läuft aus in: &e%time% Stunden"
+    - "&7-------------------------"
+your-listed-item:
+    # %price% = Price of listing
+    # %time% = Time until listing expires
+    - "&7-------------------------"
+    - "&cKlick hier um das Angebot zu schließen."
+    - ""
+    - "&9Preis: &e%price%"
+    - "&9Läuft aus in: &e%time% Stunden"
+    - "&7-------------------------"
+expired-item:
+    # %price% = Price of listing
+    - "&7-------------------------"
+    - "&aKlicke um das Item Abzuholen."
+    - ""
+    - ""
+    - "&9Preis: &e%price%$"
+    - "&7-------------------------"
+view-listed-items:
+    # %selling% = Number of active listings
+    id: 264
+    name: "&6Items die du Verkaufst:"
+    lore:
+        - "&aKlicke hier um eine liste deiner Items zu sehen"
+        - "&aDie du Verkaufst."
+        - ""
+        - "&9Verkauft: &e%selling%"
+view-expired-items:
+    # %expired% = Number of Expired / Cancelled Items
+    id: 394
+    name: "&6Abholen: Abgelaufender/Abbgebrochende Angebote"
+    lore:
+        - "&r&aKlicke um eine list der Abgelaufenden Items zu erhalten und einzusammeln"
+        - "&aItems die Abgelaufenoder abbgebrochen wurden."
+        - ""
+        - "&9Items zum einsammeln: &e%expired%"
+previous-page:
+    id: "339"
+    name: "&a<- Haupt Seite"
+    lore:
+        - "Gehe zum Start"
+next-page:
+    id: "339"
+    name: "&aNächste seite ->"
+    lore:
+        - "Gehe zur nächsten seite"
+back-button:
+    id: "339"
+    name: "&6Zurück"
+    lore:
+sell-description:
+    id: "388"
+    name: "&6Verkauf von Items"
+    lore:
+        - "&aUm ein Item zum verkauf anzubieten:"
+        - "&aHalte das Item in derine hand und schreibe; &b/ah sell <preis>|in den Chat&a."
+main-description:
+    id: "340"
+    name: "&6Was ist das Hier?"
+    lore:
+        - "&aDas hier ist ein verkaufshaus!"
+        - "&aDu kannst hier Items zum verkauf Anbieten"
+        - "&aWelche andere kaufen können."
+        - ""
+        - "&aDas ist ein guter weg deine Items zu verkauf"
+        - "&aAnzubieten und geld zu verdienen"
+        - "&adurch vielleicht Interresierte spieler."
+main-stats:
+    # %page% = Current page
+    # %max% = Max page
+    # %total% = Total listing count
+    id: "54"
+    name: "&l&6Verkaufs Haus"
+    lore:
+        - "&aseite %page%/%max%"
+        - "&7Anzahl der Items; &b%total% &7"
+        - "Klicke um die seite neu zu Laden"
+listings-description:
+    id: "340"
+    name: "&6Was ist das?"
+    lore:
+        - "&aDas ist eine liste all deiner Angebote"
+        - "&adie du momentan in Verkaufs Haus hast"
+        - ""
+        - "&aDu kannst deine angebote hier abbrechen"
+        - "&aund alle Items die Bagelaufen sind Einsammeln ."
+listings-stats:
+    # %page% = Current page
+    # %max% = Max page
+    # %total% = Total listing count
+    id: "54"
+    name: "&l&6Liste"
+    lore:
+        - "&aSeite %page%/%max%"
+        - "&7Items &b%total% &7"
+expired-description:
+    id: "340"
+    name: "&6Was ist das?"
+    lore:
+        - "&aDiese seite zeigt dir all deine:"
+        - "&aAbgelaufende oder Abgebrochende angebote an"
+        - "&adie du dir hier abholen kannst"
+        - "&aitem back to you from this menu."
+        - ""
+        - "&aKlicke einfach auf das Item wenn du"
+        - "&agenug platz im inventar hast."
+expired-stats:
+    # %page% = Current page
+    # %max% = Max page
+    # %total% = Total listing count
+    id: "152"
+    name: "&l&6Abgelaufen"
+    lore:
+        - "&aSeite: %page%/%max%"
+        - "&7Anzahl der Items &b%total% &7"
+purchase-confirm:
+    name: "&aKauf durchführen"
+purchase-cancel:
+    name: "&cKauf abbrechen"
+purchaseItem:
+    lore:
+        - ""
+        - "&9Preis: &e$%price%"
+        - "&9Verkäufer: &e%seller%"
+...<?php
+namespace shock95x\auctionhouse\utils;
+
+use pocketmine\item\Item;
+use pocketmine\utils\Config;
+
+class Settings {
+
+	private static $prefix = "[&l&6Auction House&r]";
+	private static $defaultLang = "en_US";
+	private static $expireInterval = 48;
+	private static $listingPrice = 0;
+	private static $creativeSale = false;
+	private static $maxItems = 45;
+	private static $minPrice = 0;
+	private static $maxPrice = -1;
+	private static $blacklist = [];
+
+	public static function init(Config $config) {
+		self::$prefix = $config->get("prefix");
+		self::$defaultLang = $config->get("default-language");
+		self::$expireInterval = $config->get("expire-interval");
+		self::$listingPrice = $config->get("listing-price");
+		self::$creativeSale = $config->get("creative-sale");
+		self::$maxItems = $config->get("max-items");
+		self::$minPrice = $config->get("min-price");
+		self::$maxPrice = $config->get("max-price");
+		self::$blacklist = $config->getNested("blacklist");
+	}
+
+	/**
+	 * @return string
+	 */
+	public static function getPrefix(): string {
+		return self::$prefix;
+	}
+
+	/**
+	 * @return string
+	 */
+	public static function getDefaultLang(): string {
+		return self::$defaultLang;
+	}
+
+	/**
+	 * @return int
+	 */
+	public static function getExpireInterval(): int {
+		return self::$expireInterval;
+	}
+
+	/**
+	 * @return int
+	 */
+	public static function getListingPrice(): int {
+		return self::$listingPrice;
+	}
+
+	/**
+	 * @return bool
+	 */
+	public static function getCreativeSale() : bool {
+		return self::$creativeSale;
+	}
+
+	/**
+	 * @return int
+	 */
+	public static function getMaxItems(): int {
+		return self::$maxItems;
+	}
+
+	public static function getMinPrice() : int {
+		return self::$minPrice;
+	}
+
+	public static function getMaxPrice() : int {
+		return self::$maxPrice;
+	}
+	/**
+	 * @return Item[]
+	 */
+	public static function getBlacklist(): array {
+		$array = [];
+		foreach (self::$blacklist as $item) {
+			$array[] = Item::fromString($item);
+		}
+		return $array;
+	}
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\muqsit\invmenu;
+
+use InvalidArgumentException;
+use shock95x\auctionhouse\libs\muqsit\invmenu\metadata\DoubleBlockMenuMetadata;
+use shock95x\auctionhouse\libs\muqsit\invmenu\metadata\MenuMetadata;
+use shock95x\auctionhouse\libs\muqsit\invmenu\metadata\SingleBlockMenuMetadata;
+use pocketmine\block\BlockFactory;
+use pocketmine\block\BlockIds;
+use pocketmine\network\mcpe\protocol\types\WindowTypes;
+use pocketmine\plugin\Plugin;
+use pocketmine\tile\Tile;
+
+final class InvMenuHandler{
+
+	/** @var Plugin|null */
+	private static $registrant;
+
+	/** @var MenuMetadata[] */
+	private static $menu_types = [];
+
+	public static function getRegistrant() : Plugin{
+		return self::$registrant;
+	}
+
+	public static function register(Plugin $plugin) : void{
+		if(self::isRegistered()){
+			throw new InvalidArgumentException($plugin->getName() . " attempted to register " . self::class . " twice.");
+		}
+
+		self::$registrant = $plugin;
+		self::registerDefaultMenuTypes();
+		$plugin->getServer()->getPluginManager()->registerEvents(new InvMenuEventHandler(), $plugin);
+	}
+
+	public static function isRegistered() : bool{
+		return self::$registrant instanceof Plugin;
+	}
+
+	private static function registerDefaultMenuTypes() : void{
+		self::registerMenuType(new SingleBlockMenuMetadata(InvMenu::TYPE_CHEST, 27, WindowTypes::CONTAINER, BlockFactory::get(BlockIds::CHEST), Tile::CHEST));
+		self::registerMenuType(new DoubleBlockMenuMetadata(InvMenu::TYPE_DOUBLE_CHEST, 54, WindowTypes::CONTAINER, BlockFactory::get(BlockIds::CHEST), Tile::CHEST));
+		self::registerMenuType(new SingleBlockMenuMetadata(InvMenu::TYPE_HOPPER, 5, WindowTypes::HOPPER, BlockFactory::get(BlockIds::HOPPER_BLOCK), "Hopper"));
+	}
+
+	public static function registerMenuType(MenuMetadata $type, bool $override = false) : void{
+		if(isset(self::$menu_types[$identifier = $type->getIdentifier()]) && !$override){
+			throw new InvalidArgumentException("A menu type with the identifier \"" . $identifier . "\" is already registered as " . get_class(self::$menu_types[$identifier]));
+		}
+
+		self::$menu_types[$identifier] = $type;
+	}
+
+	public static function getMenuType(string $identifier) : ?MenuMetadata{
+		return self::$menu_types[$identifier] ?? null;
+	}
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\muqsit\invmenu\metadata;
+
+use shock95x\auctionhouse\libs\muqsit\invmenu\session\MenuExtradata;
+use pocketmine\block\Block;
+use pocketmine\math\Vector3;
+use pocketmine\nbt\NetworkLittleEndianNBTStream;
+use pocketmine\nbt\tag\CompoundTag;
+use pocketmine\network\mcpe\protocol\BlockActorDataPacket;
+use pocketmine\network\mcpe\protocol\UpdateBlockPacket;
+use pocketmine\Player;
+use pocketmine\tile\Nameable;
+use pocketmine\tile\Tile;
+
+class SingleBlockMenuMetadata extends MenuMetadata{
+
+	/** @var NetworkLittleEndianNBTStream */
+	protected static $serializer;
+
+	/** @var Block */
+	protected $block;
+
+	/** @var string */
+	protected $identifier;
+
+	/** @var int */
+	protected $size;
+
+	/** @var string */
+	protected $tile_id;
+
+	public function __construct(string $identifier, int $size, int $window_type, Block $block, string $tile_id){
+		parent::__construct($identifier, $size, $window_type);
+
+		if(self::$serializer === null){
+			self::$serializer = new NetworkLittleEndianNBTStream();
+		}
+
+		$this->block = $block;
+		$this->tile_id = $tile_id;
+	}
+
+	public function sendGraphic(Player $player, MenuExtradata $metadata) : void{
+		$positions = $this->getBlockPositions($metadata);
+		$name = $metadata->getName();
+		foreach($positions as $pos){
+			$packet = new UpdateBlockPacket();
+			$packet->x = $pos->x;
+			$packet->y = $pos->y;
+			$packet->z = $pos->z;
+			$packet->blockRuntimeId = $this->block->getRuntimeId();
+			$packet->flags = UpdateBlockPacket::FLAG_NETWORK;
+			$player->sendDataPacket($packet);
+			$player->sendDataPacket($this->getBlockActorDataPacketAt($player, $pos, $name));
+		}
+	}
+
+	protected function getBlockActorDataPacketAt(Player $player, Vector3 $pos, ?string $name) : BlockActorDataPacket{
+		$packet = new BlockActorDataPacket();
+		$packet->x = $pos->x;
+		$packet->y = $pos->y;
+		$packet->z = $pos->z;
+		$packet->namedtag = self::$serializer->write($this->getBlockActorDataAt($pos, $name));
+		return $packet;
+	}
+
+	protected function getBlockActorDataAt(Vector3 $pos, ?string $name) : CompoundTag{
+		$tag = new CompoundTag();
+		$tag->setString(Tile::TAG_ID, $this->tile_id);
+		if($name !== null){
+			$tag->setString(Nameable::TAG_CUSTOM_NAME, $name);
+		}
+		return $tag;
+	}
+
+	public function removeGraphic(Player $player, MenuExtradata $extradata) : void{
+		$level = $player->getLevel();
+		foreach($this->getBlockPositions($extradata) as $pos){
+			$packet = new UpdateBlockPacket();
+			$packet->x = $pos->x;
+			$packet->y = $pos->y;
+			$packet->z = $pos->z;
+			$packet->blockRuntimeId = $level->getBlockAt($pos->x, $pos->y, $pos->z)->getRuntimeId();
+			$packet->flags = UpdateBlockPacket::FLAG_NETWORK;
+			$player->sendDataPacket($packet, false, true);
+		}
+	}
+
+	protected function getBlockPositions(MenuExtradata $metadata) : array{
+		return [$metadata->getPosition()];
+	}
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\muqsit\invmenu\metadata;
+
+use shock95x\auctionhouse\libs\muqsit\invmenu\inventory\InvMenuInventory;
+use shock95x\auctionhouse\libs\muqsit\invmenu\session\MenuExtradata;
+use pocketmine\math\Vector3;
+use pocketmine\Player;
+
+abstract class MenuMetadata{
+
+	/** @var string */
+	protected $identifier;
+
+	/** @var int */
+	protected $size;
+
+	/** @var int */
+	protected $window_type;
+
+	public function __construct(string $identifier, int $size, int $window_type){
+		$this->identifier = $identifier;
+		$this->size = $size;
+		$this->window_type = $window_type;
+	}
+
+	public function getIdentifier() : string{
+		return $this->identifier;
+	}
+
+	public function getSize() : int{
+		return $this->size;
+	}
+
+	public function getWindowType() : int{
+		return $this->window_type;
+	}
+
+	public function createInventory() : InvMenuInventory{
+		return new InvMenuInventory($this);
+	}
+
+	protected function calculateGraphicOffset(Player $player) : Vector3{
+		$offset = $player->getDirectionVector();
+		$offset->x *= -(1 + $player->width);
+		$offset->y *= -(1 + $player->height);
+		$offset->z *= -(1 + $player->width);
+		return $offset;
+	}
+
+	public function calculateGraphicPosition(Player $player) : Vector3{
+		return $player->getPosition()->add($this->calculateGraphicOffset($player))->floor();
+	}
+
+	abstract public function sendGraphic(Player $player, MenuExtradata $metadata) : void;
+
+	abstract public function removeGraphic(Player $player, MenuExtradata $extradata) : void;
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\muqsit\invmenu;
+
+use Closure;
+use InvalidStateException;
+use shock95x\auctionhouse\libs\muqsit\invmenu\inventory\InvMenuInventory;
+use shock95x\auctionhouse\libs\muqsit\invmenu\metadata\MenuMetadata;
+use shock95x\auctionhouse\libs\muqsit\invmenu\session\PlayerManager;
+use pocketmine\inventory\transaction\action\SlotChangeAction;
+use pocketmine\item\Item;
+use pocketmine\Player;
+
+abstract class InvMenu implements MenuIds{
+
+	public static function create(string $identifier) : SharedInvMenu{
+		return new SharedInvMenu(InvMenuHandler::getMenuType($identifier));
+	}
+
+	/**
+	 * @deprecated Use multiple InvMenu::create() instead.
+	 * @param string $identifier
+	 * @return SessionizedInvMenu
+	 */
+	public static function createSessionized(string $identifier) : SessionizedInvMenu{
+		trigger_error("Use multiple InvMenu instances instead.", E_USER_DEPRECATED);
+		return new SessionizedInvMenu(InvMenuHandler::getMenuType($identifier));
+	}
+
+	/** @var MenuMetadata */
+	protected $type;
+
+	/** @var bool */
+	protected $readonly = false;
+
+	/** @var string|null */
+	protected $name;
+
+	/** @var callable|null */
+	protected $listener;
+
+	/** @var callable|null */
+	protected $inventory_close_listener;
+
+	public function __construct(MenuMetadata $type){
+		$this->type = $type;
+	}
+
+	public function getType() : MenuMetadata{
+		return $this->type;
+	}
+
+	public function getName() : ?string{
+		return $this->name;
+	}
+
+	public function setName(?string $name) : self{
+		$this->name = $name;
+		return $this;
+	}
+
+	public function isReadonly() : bool{
+		return $this->readonly;
+	}
+
+	public function readonly(bool $value = true) : self{
+		if(!InvMenuHandler::isRegistered()){
+			throw new InvalidStateException("Tried altering readonly state before registration");
+		}
+		$this->readonly = $value;
+		return $this;
+	}
+
+	public function setListener(?callable $listener) : self{
+		if(!InvMenuHandler::isRegistered()){
+			throw new InvalidStateException("Tried setting listener before registration");
+		}
+		$this->listener = $listener;
+		return $this;
+	}
+
+	public function setInventoryCloseListener(?callable $listener) : self{
+		if(!InvMenuHandler::isRegistered()){
+			throw new InvalidStateException("Tried setting inventory close listener before registration");
+		}
+		$this->inventory_close_listener = $listener;
+		return $this;
+	}
+
+	public function copyProperties(InvMenu $menu) : void{
+		$this->setName($menu->getName())
+			->readonly($menu->isReadonly())
+			->setListener($menu->listener)
+			->setInventoryCloseListener($menu->inventory_close_listener);
+	}
+
+	final public function send(Player $player, ?string $name = null, ?Closure $callback = null) : void{
+		$session = PlayerManager::get($player);
+		if($session === null){
+			if($callback !== null){
+				$callback(false);
+			}
+		}else{
+			$network = $session->getNetwork();
+			$network->dropPending();
+			$session->removeWindow();
+			$network->wait(function(bool $success) use($player, $session, $network, $name, $callback) : void{
+				if($success){
+					$extradata = $session->getMenuExtradata();
+					$extradata->setName($name ?? $this->getName());
+					$extradata->setPosition($this->type->calculateGraphicPosition($player));
+					$this->type->sendGraphic($player, $extradata);
+					$network->wait(function(bool $success) use($session, $callback) : void{
+						if($success){
+							$session->setCurrentMenu($this, $callback);
+						}elseif($callback !== null){
+							$callback(false);
+						}
+					});
+				}elseif($callback !== null){
+					$callback(false);
+				}
+			});
+		}
+	}
+
+	abstract public function getInventoryForPlayer(Player $player) : InvMenuInventory;
+
+	public function handleInventoryTransaction(Player $player, Item $in, Item $out, SlotChangeAction $action) : bool{
+		if($this->readonly){
+			if($this->listener !== null){
+				($this->listener)($player, $in, $out, $action);
+			}
+			return false;
+		}
+
+		return $this->listener === null || ($this->listener)($player, $in, $out, $action);
+	}
+
+	public function onClose(Player $player) : void{
+		if($this->inventory_close_listener !== null){
+			($this->inventory_close_listener)($player, $this->getInventoryForPlayer($player));
+		}
+
+		PlayerManager::getNonNullable($player)->removeCurrentMenu();
+	}
+}
+<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+namespace shock95x\auctionhouse\libs\muqsit\invmenu;
+
+interface MenuIds{
+
+	public const TYPE_CHEST = "invmenu:chest";
+	public const TYPE_DOUBLE_CHEST = "invmenu:double_chest";
+	public const TYPE_HOPPER = "invmenu:hopper";
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\muqsit\invmenu\metadata;
+
+use shock95x\auctionhouse\libs\muqsit\invmenu\session\MenuExtradata;
+use pocketmine\math\Vector3;
+use pocketmine\nbt\tag\CompoundTag;
+use pocketmine\Player;
+
+class DoubleBlockMenuMetadata extends SingleBlockMenuMetadata{
+
+	protected function getBlockActorDataAt(Vector3 $pos, ?string $name) : CompoundTag{
+		$tag = parent::getBlockActorDataAt($pos, $name);
+		$tag->setInt("pairx", $pos->x + (($pos->x & 1) ? 1 : -1));
+		$tag->setInt("pairz", $pos->z);
+		return $tag;
+	}
+
+	protected function getBlockPositions(MenuExtradata $metadata) : array{
+		$pos = $metadata->getPosition();
+		return [$pos, ($pos->x & 1) ? $pos->east() : $pos->west()];
+	}
+
+	protected function calculateGraphicOffset(Player $player) : Vector3{
+		$offset = parent::calculateGraphicOffset($player);
+		$offset->x *= 2;
+		$offset->z *= 2;
+		return $offset;
+	}
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\muqsit\invmenu;
+
+use shock95x\auctionhouse\libs\muqsit\invmenu\session\PlayerManager;
+use pocketmine\event\inventory\InventoryTransactionEvent;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerJoinEvent;
+use pocketmine\event\player\PlayerQuitEvent;
+use pocketmine\event\server\DataPacketReceiveEvent;
+use pocketmine\inventory\transaction\action\SlotChangeAction;
+use pocketmine\network\mcpe\protocol\NetworkStackLatencyPacket;
+
+class InvMenuEventHandler implements Listener{
+
+	/**
+	 * @param PlayerJoinEvent $event
+	 * @priority LOW
+	 */
+	public function onPlayerJoin(PlayerJoinEvent $event) : void{
+		PlayerManager::create($event->getPlayer());
+	}
+
+	/**
+	 * @param PlayerQuitEvent $event
+	 * @priority MONITOR
+	 */
+	public function onPlayerQuit(PlayerQuitEvent $event) : void{
+		PlayerManager::destroy($event->getPlayer());
+	}
+
+	/**
+	 * @param DataPacketReceiveEvent $event
+	 * @priority NORMAL
+	 * @ignoreCancelled true
+	 */
+	public function onDataPacketReceive(DataPacketReceiveEvent $event) : void{
+		$packet = $event->getPacket();
+		if($packet instanceof NetworkStackLatencyPacket){
+			$session = PlayerManager::get($event->getPlayer());
+			if($session !== null){
+				$session->getNetwork()->notify($packet->timestamp);
+			}
+		}
+	}
+
+	/**
+	 * @param InventoryTransactionEvent $event
+	 * @priority NORMAL
+	 * @ignoreCancelled true
+	 */
+	public function onInventoryTransaction(InventoryTransactionEvent $event) : void{
+		$transaction = $event->getTransaction();
+		$player = $transaction->getSource();
+
+		$session = PlayerManager::get($player);
+		if($session !== null){
+			$menu = $session->getCurrentMenu();
+			if($menu !== null){
+				$inventory = $menu->getInventoryForPlayer($player);
+				foreach($transaction->getActions() as $action){
+					if(
+						$action instanceof SlotChangeAction &&
+						$action->getInventory() === $inventory &&
+						!$menu->handleInventoryTransaction($player, $action->getSourceItem(), $action->getTargetItem(), $action)
+					){
+						$event->setCancelled();
+						break;
+					}
+				}
+			}
+		}
+	}
+}<?php
+namespace shock95x\auctionhouse\database;
+
+use Generator;
+use shock95x\auctionhouse\event\AuctionEndEvent;
+use shock95x\auctionhouse\database\utils\BinaryStringParser;
+use shock95x\auctionhouse\database\utils\BinaryStringParserInstance;
+use shock95x\auctionhouse\AuctionHouse;
+use pocketmine\nbt\BigEndianNBTStream;
+use pocketmine\utils\Config;
+use shock95x\auctionhouse\libs\poggit\libasynql\DataConnector;
+use shock95x\auctionhouse\libs\poggit\libasynql\libasynql;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlError;
+use shock95x\auctionhouse\libs\SOFe\AwaitGenerator\Await;
+
+class Database {
+
+	/** @var DataConnector */
+	private $database;
+	/** @var AuctionHouse  */
+	private $plugin;
+	/** @var Config  */
+	private $config;
+	/** @var BinaryStringParserInstance */
+	private $parser;
+	/** @var DataHolder */
+	private $holder;
+
+	/**
+	 * @param AuctionHouse $plugin
+	 * @param Config $config
+	 */
+	public function __construct(AuctionHouse $plugin, Config $config) {
+		$this->plugin = $plugin;
+		$this->config = $config;
+	}
+
+	/**
+	 * @return Database
+	 */
+	public function connect() : Database {
+		try {
+			$this->database = libasynql::create($this->plugin, $this->config->get("database"), [
+				"sqlite" => "statements/sqlite.sql",
+				"mysql" => "statements/mysql.sql"
+			]);
+			$this->database->executeGeneric(Query::INIT);
+		} catch(SqlError $error) {
+			$this->plugin->getLogger()->error($error->getMessage());
+		}
+		$this->database->waitAll();
+
+		$this->parser = BinaryStringParser::fromDatabase($this->config->get("database")["type"]);
+		$this->holder = new DataHolder($this);
+		$this->holder->loadListings();
+		return $this;
+	}
+
+	public function getConnector() : DataConnector {
+		return $this->database;
+	}
+
+	protected function asyncSelect(string $query, array $args = []): Generator {
+		$this->database->executeSelect($query, $args, yield, yield Await::REJECT);
+		return yield Await::ONCE;
+	}
+
+	public function save() {
+		$list = DataHolder::getListings();
+		foreach($list as $listing) {
+			if(time() >= $listing->getEndTime()) {
+				$listing->setExpired();
+				(new AuctionEndEvent($listing, AuctionEndEvent::EXPIRED))->call();
+			}
+			$this->insert($listing->getSeller(true), $listing->getSeller(), $listing->getPrice(), (new BigEndianNBTStream())->writeCompressed($listing->getItem()->nbtSerialize()), $listing->getEndTime(), $listing->isExpired(), $listing->getMarketId());
+		}
+	}
+
+	/**
+	 * @param string $uuid
+	 * @param string $username
+	 * @param int $price
+	 * @param string $nbt
+	 * @param int $endTime
+	 * @param bool $expired
+	 * @param int|null $id
+	 */
+	public function insert(string $uuid, string $username, int $price, string $nbt, int $endTime, bool $expired = false, $id = null) {
+		$this->database->executeInsert(Query::INSERT, [
+			"uuid" => $uuid,
+			"username" => $username,
+			"price" => $price,
+			"nbt" => $this->parser->encode($nbt),
+			"id" => $id == null ? time() : $id,
+			"end_time" => $endTime,
+			"expired" => $expired
+		]);
+	}
+
+	public function fetchAll() : Generator {
+		$this->database->executeSelect(Query::FETCH_ALL, [], yield, yield Await::REJECT);
+		return yield Await::ONCE;
+	}
+
+	public function deleteFromId(string $id) {
+		$this->database->executeGeneric(Query::DELETE, ["id" => $id]);
+	}
+
+	public function close() {
+		if(isset($this->database)) {
+			$this->database->waitAll();
+			$this->database->close();
+		}
+	}
+
+	public function getParser() : BinaryStringParserInstance {
+		return $this->parser;
+	}
+
+	public function getDatabase() : DataConnector {
+		return $this->database;
+	}
+}<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql;
+
+use InvalidArgumentCountException;
+use pocketmine\plugin\Plugin;
+use pocketmine\utils\Terminal;
+use pocketmine\utils\Utils;
+use shock95x\auctionhouse\libs\poggit\libasynql\base\DataConnectorImpl;
+use shock95x\auctionhouse\libs\poggit\libasynql\base\SqlThreadPool;
+use shock95x\auctionhouse\libs\poggit\libasynql\mysqli\MysqlCredentials;
+use shock95x\auctionhouse\libs\poggit\libasynql\mysqli\MysqliThread;
+use shock95x\auctionhouse\libs\poggit\libasynql\sqlite3\Sqlite3Thread;
+use function array_keys;
+use function count;
+use function extension_loaded;
+use function implode;
+use function is_array;
+use function is_string;
+use function strtolower;
+use function usleep;
+
+/**
+ * An utility class providing convenient access to the API
+ */
+final class libasynql{
+	/** @var bool */
+	private static $packaged;
+
+	public static function isPackaged() : bool{
+		return self::$packaged;
+	}
+
+	public static function detectPackaged() : void{
+		self::$packaged = __CLASS__ !== 'poggit\libasynql\libasynql';
+
+		if(!self::$packaged && defined("pocketmine\\VERSION")){
+			echo Terminal::$COLOR_YELLOW . "Warning: Use of unshaded libasynql detected. Debug mode is enabled. This may lead to major performance drop. Please use a shaded package in production. See https://poggit.pmmp.io/virion for more information.\n";
+		}
+	}
+
+	private function __construct(){
+	}
+
+	/**
+	 * Create a {@link DatabaseConnector} from a plugin and a config entry, and initializes it with the relevant SQL files according to the selected dialect
+	 *
+	 * @param Plugin              $plugin     the plugin using libasynql
+	 * @param mixed               $configData the config entry for database settings
+	 * @param string[]|string[][] $sqlMap     an associative array with key as the SQL dialect ("mysql", "sqlite") and value as a string or string array indicating the relevant SQL files in the plugin's resources directory
+	 * @param bool                $logQueries whether libasynql should log the queries with the plugin logger at the DEBUG level. Default <code>!libasynql::isPackaged()</code>.
+	 * @return DataConnector
+	 * @throws SqlError if the connection could not be created
+	 */
+	public static function create(Plugin $plugin, $configData, array $sqlMap, bool $logQueries = null) : DataConnector{
+		if(!is_array($configData)){
+			throw new ConfigException("Database settings are missing or incorrect");
+		}
+
+		$type = (string) $configData["type"];
+		if($type === ""){
+			throw new ConfigException("Database type is missing");
+		}
+
+		if(count($sqlMap) === 0){
+			throw new InvalidArgumentCountException('Parameter $sqlMap cannot be empty');
+		}
+
+		$pdo = ($configData["prefer-pdo"] ?? false) && extension_loaded("pdo");
+
+		$dialect = null;
+		$placeHolder = null;
+		switch(strtolower($type)){
+			case "sqlite":
+			case "sqlite3":
+			case "sq3":
+				if(!$pdo && !extension_loaded("sqlite3")){
+					throw new ExtensionMissingException("sqlite3");
+				}
+
+				$fileName = self::resolvePath($plugin->getDataFolder(), $configData["sqlite"]["file"] ?? "data.sqlite");
+				if($pdo){
+					// TODO add PDO support
+				}else{
+					$factory = Sqlite3Thread::createFactory($fileName);
+				}
+				$dialect = "sqlite";
+				break;
+			case "mysql":
+			case "mysqli":
+				if(!$pdo && !extension_loaded("mysqli")){
+					throw new ExtensionMissingException("mysqli");
+				}
+
+				if(!isset($configData["mysql"])){
+					throw new ConfigException("Missing MySQL settings");
+				}
+
+				$cred = MysqlCredentials::fromArray($configData["mysql"], strtolower($plugin->getName()));
+
+				if($pdo){
+					// TODO add PDO support
+				}else{
+					$factory = MysqliThread::createFactory($cred);
+					$placeHolder = "?";
+				}
+				$dialect = "mysql";
+
+				break;
+		}
+
+		if(!isset($dialect, $factory, $sqlMap[$dialect])){
+			throw new ConfigException("Unsupported database type \"$type\". Try \"" . implode("\" or \"", array_keys($sqlMap)) . "\".");
+		}
+
+		$pool = new SqlThreadPool($factory, $configData["worker-limit"] ?? 1);
+		while(!$pool->connCreated()){
+			usleep(1000);
+		}
+		if($pool->hasConnError()){
+			throw new SqlError(SqlError::STAGE_CONNECT, $pool->getConnError());
+		}
+
+		$connector = new DataConnectorImpl($plugin, $pool, $placeHolder, $logQueries ?? !libasynql::isPackaged());
+		foreach(is_string($sqlMap[$dialect]) ? [$sqlMap[$dialect]] : $sqlMap[$dialect] as $file){
+			$connector->loadQueryFile($plugin->getResource($file), $file);
+		}
+		
+		return $connector;
+	}
+
+	private static function resolvePath(string $folder, string $path) : string{
+		if($path{0} === "/"){
+			return $path;
+		}
+		if(Utils::getOS() === "win"){
+			if($path{0} === "\\" || $path{1} === ":"){
+				return $path;
+			}
+		}
+		return $folder . $path;
+	}
+}
+
+/**
+ * An empty function accepting void parameters and returning void. Can be used as a dummy function.
+ */
+function nop() : void{
+
+}
+
+libasynql::detectPackaged();
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\sqlite3;
+
+use Closure;
+use Exception;
+use InvalidArgumentException;
+use pocketmine\snooze\SleeperNotifier;
+use shock95x\auctionhouse\libs\poggit\libasynql\base\QueryRecvQueue;
+use shock95x\auctionhouse\libs\poggit\libasynql\base\QuerySendQueue;
+use shock95x\auctionhouse\libs\poggit\libasynql\base\SqlSlaveThread;
+use shock95x\auctionhouse\libs\poggit\libasynql\result\SqlChangeResult;
+use shock95x\auctionhouse\libs\poggit\libasynql\result\SqlColumnInfo;
+use shock95x\auctionhouse\libs\poggit\libasynql\result\SqlInsertResult;
+use shock95x\auctionhouse\libs\poggit\libasynql\result\SqlSelectResult;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlError;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlResult;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlThread;
+use SQLite3;
+use function array_values;
+use function assert;
+use function is_array;
+use const INF;
+use const NAN;
+use const SQLITE3_ASSOC;
+use const SQLITE3_BLOB;
+use const SQLITE3_FLOAT;
+use const SQLITE3_INTEGER;
+use const SQLITE3_NULL;
+use const SQLITE3_TEXT;
+
+class Sqlite3Thread extends SqlSlaveThread{
+	/** @var string */
+	private $path;
+
+	public static function createFactory(string $path) : Closure{
+		return function(SleeperNotifier $notifier, QuerySendQueue $send, QueryRecvQueue $recv) use ($path){
+			return new Sqlite3Thread($path, $notifier, $send, $recv);
+		};
+	}
+
+	public function __construct(string $path, SleeperNotifier $notifier, QuerySendQueue $send = null, QueryRecvQueue $recv = null){
+		$this->path = $path;
+		parent::__construct($notifier, $send, $recv);
+	}
+
+	protected function createConn(&$sqlite) : ?string{
+		try{
+			$sqlite = new SQLite3($this->path);
+			$sqlite->busyTimeout(60000); // default value in SQLite2
+			return null;
+		}catch(Exception $e){
+			return $e->getMessage();
+		}
+	}
+
+	protected function executeQuery($sqlite, int $mode, string $query, array $params) : SqlResult{
+		assert($sqlite instanceof SQLite3);
+		$stmt = $sqlite->prepare($query);
+		if($stmt === false){
+			throw new SqlError(SqlError::STAGE_PREPARE, $sqlite->lastErrorMsg(), $query, $params);
+		}
+		foreach($params as $paramName => $param){
+			$bind = $stmt->bindValue($paramName, $param);
+			if(!$bind){
+				throw new SqlError(SqlError::STAGE_PREPARE, "when binding $paramName: " . $sqlite->lastErrorMsg(), $query, $params);
+			}
+		}
+		$result = $stmt->execute();
+		if($result === false){
+			throw new SqlError(SqlError::STAGE_EXECUTE, $sqlite->lastErrorMsg(), $query, $params);
+		}
+		switch($mode){
+			case SqlThread::MODE_GENERIC:
+				$ret = new SqlResult();
+				$result->finalize();
+				$stmt->close();
+				return $ret;
+			case SqlThread::MODE_CHANGE:
+				$ret = new SqlChangeResult($sqlite->changes());
+				$result->finalize();
+				$stmt->close();
+				return $ret;
+			case SqlThread::MODE_INSERT:
+				$ret = new SqlInsertResult($sqlite->changes(), $sqlite->lastInsertRowID());
+				$result->finalize();
+				$stmt->close();
+				return $ret;
+			case SqlThread::MODE_SELECT:
+				/** @var SqlColumnInfo[] $colInfo */
+				$colInfo = [];
+				$rows = [];
+				while(is_array($row = $result->fetchArray(SQLITE3_ASSOC))){
+					foreach(array_values($row) as $i => &$value){
+						static $columnTypeMap = [
+							SQLITE3_INTEGER => SqlColumnInfo::TYPE_INT,
+							SQLITE3_FLOAT => SqlColumnInfo::TYPE_FLOAT,
+							SQLITE3_TEXT => SqlColumnInfo::TYPE_STRING,
+							SQLITE3_BLOB => SqlColumnInfo::TYPE_STRING,
+							SQLITE3_NULL => SqlColumnInfo::TYPE_NULL,
+						];
+						$colInfo[$i] = new SqlColumnInfo($result->columnName($i), $columnTypeMap[$result->columnType($i)]);
+						if($colInfo[$i]->getType() === SqlColumnInfo::TYPE_FLOAT){
+							if($value === "NAN"){
+								$value = NAN;
+							}elseif($value === "INF"){
+								$value = INF;
+							}elseif($value === "-INF"){
+								$value = -INF;
+							}
+						}
+					}
+					unset($value);
+					$rows[] = $row;
+				}
+				$ret = new SqlSelectResult($colInfo, $rows);
+				$result->finalize();
+				$stmt->close();
+				return $ret;
+		}
+
+		throw new InvalidArgumentException("Unknown mode $mode");
+	}
+
+	protected function close(&$resource) : void{
+		assert($resource instanceof SQLite3);
+		$resource->close();
+	}
+
+	public function getThreadName() : string{
+		return __NAMESPACE__ . " connector #$this->slaveNumber";
+	}
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\base;
+
+use ClassLoader;
+use InvalidArgumentException;
+use pocketmine\Server;
+use pocketmine\snooze\SleeperNotifier;
+use pocketmine\Thread;
+use shock95x\auctionhouse\libs\poggit\libasynql\libasynql;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlError;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlResult;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlThread;
+use const PTHREADS_INHERIT_CONSTANTS;
+use const PTHREADS_INHERIT_INI;
+
+abstract class SqlSlaveThread extends Thread implements SqlThread{
+	/** @var SleeperNotifier */
+	private $notifier;
+
+	private static $nextSlaveNumber = 0;
+
+	protected $slaveNumber;
+	protected $bufferSend;
+	protected $bufferRecv;
+	protected $connCreated = false;
+	protected $connError;
+	protected $busy = false;
+
+	protected function __construct(SleeperNotifier $notifier, QuerySendQueue $bufferSend = null, QueryRecvQueue $bufferRecv = null){
+		$this->notifier = $notifier;
+
+		$this->slaveNumber = self::$nextSlaveNumber++;
+		$this->bufferSend = $bufferSend ?? new QuerySendQueue();
+		$this->bufferRecv = $bufferRecv ?? new QueryRecvQueue();
+
+		if(!libasynql::isPackaged()){
+			/** @noinspection PhpUndefinedMethodInspection */
+			/** @noinspection NullPointerExceptionInspection */
+			/** @var ClassLoader $cl */
+			$cl = Server::getInstance()->getPluginManager()->getPlugin("DEVirion")->getVirionClassLoader();
+			$this->setClassLoader($cl);
+		}
+		$this->start(PTHREADS_INHERIT_INI | PTHREADS_INHERIT_CONSTANTS);
+	}
+
+	public function run() : void{
+		$this->registerClassLoader();
+		$error = $this->createConn($resource);
+		$this->connCreated = true;
+		$this->connError = $error;
+
+		if($error !== null){
+			return;
+		}
+
+		while(true){
+			$row = $this->bufferSend->fetchQuery();
+			if(!is_string($row)){
+				break;
+			}
+			$this->busy = true;
+			[$queryId, $mode, $query, $params] = unserialize($row, ["allowed_classes" => true]);
+			try{
+				$result = $this->executeQuery($resource, $mode, $query, $params);
+				$this->bufferRecv->publishResult($queryId, $result);
+			}catch(SqlError $error){
+				$this->bufferRecv->publishError($queryId, $error);
+			}
+			$this->notifier->wakeupSleeper();
+			$this->busy = false;
+		}
+		$this->close($resource);
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function isBusy(): bool {
+		return $this->busy;
+	}
+
+	public function stopRunning() : void{
+		$this->bufferSend->invalidate();
+	}
+
+	public function quit(){
+		$this->stopRunning();
+	}
+
+	public function addQuery(int $queryId, int $mode, string $query, array $params) : void{
+		$this->bufferSend->scheduleQuery($queryId, $mode, $query, $params);
+	}
+
+	public function readResults(array &$callbacks) : void{
+		while($this->bufferRecv->fetchResult($queryId, $result)){
+			if(!isset($callbacks[$queryId])){
+				throw new InvalidArgumentException("Missing handler for query #$queryId");
+			}
+
+			$callbacks[$queryId]($result);
+			unset($callbacks[$queryId]);
+		}
+	}
+
+	public function connCreated() : bool{
+		return $this->connCreated;
+	}
+
+	public function hasConnError() : bool{
+		return $this->connError !== null;
+	}
+
+	public function getConnError() : ?string{
+		return $this->connError;
+	}
+
+	protected abstract function createConn(&$resource) : ?string;
+
+	/**
+	 * @param mixed   $resource
+	 * @param int     $mode
+	 * @param string  $query
+	 * @param mixed[] $params
+	 *
+	 * @return SqlResult
+	 * @throws SqlError
+	 */
+	protected abstract function executeQuery($resource, int $mode, string $query, array $params) : SqlResult;
+
+
+	protected abstract function close(&$resource) : void;
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql;
+
+interface SqlThread{
+	public const MODE_GENERIC = 0;
+	public const MODE_CHANGE = 1;
+	public const MODE_INSERT = 2;
+	public const MODE_SELECT = 3;
+
+	/**
+	 * Joins the thread
+	 *
+	 * @see https://php.net/thread.join Thread::join
+	 */
+	public function join();
+
+	/**
+	 * Signals the thread to stop waiting for queries when the send buffer is cleared.
+	 */
+	public function stopRunning() : void;
+
+	/**
+	 * Adds a query to the queue.
+	 *
+	 * @param int     $queryId
+	 * @param int     $mode
+	 * @param string  $query
+	 * @param mixed[] $params
+	 */
+	public function addQuery(int $queryId, int $mode, string $query, array $params) : void;
+
+	/**
+	 * Handles the results that this query has completed
+	 *
+	 * @param callable[] $callbacks
+	 */
+	public function readResults(array &$callbacks) : void;
+
+	/**
+	 * Checks if the initial connection has been made, no matter successful or not.
+	 *
+	 * @return bool
+	 */
+	public function connCreated() : bool;
+
+	/**
+	 * Checks if the initial connection failed.
+	 *
+	 * @return bool
+	 */
+	public function hasConnError() : bool;
+
+	/**
+	 * Gets the error of the initial connection.
+	 *
+	 * @return null|string
+	 */
+	public function getConnError() : ?string;
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\base;
+
+use InvalidArgumentException;
+use pocketmine\Server;
+use pocketmine\snooze\SleeperNotifier;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlThread;
+
+class SqlThreadPool implements SqlThread{
+	/** @var SleeperNotifier */
+	private $notifier;
+	/** @var callable */
+	private $workerFactory;
+	/** @var SqlSlaveThread[] */
+	private $workers = [];
+	/** @var int */
+	private $workerLimit;
+
+	/** @var QuerySendQueue */
+	private $bufferSend;
+	/** @var QueryRecvQueue */
+	private $bufferRecv;
+
+	/** @var DataConnectorImpl|null */
+	private $dataConnector = null;
+
+	/**
+	 * @param DataConnectorImpl $dataConnector
+	 */
+	public function setDataConnector(DataConnectorImpl $dataConnector): void {
+		$this->dataConnector = $dataConnector;
+	}
+
+	/**
+	 * SqlThreadPool constructor.
+	 *
+	 * @param callable $workerFactory create a child worker: <code>function(?Threaded $bufferSend = null, ?Threaded $bufferRecv = null) : {@link BaseSqlThread}{}</code>
+	 * @param int      $workerLimit   the maximum number of workers to create. Workers are created lazily.
+	 */
+	public function __construct(callable $workerFactory, int $workerLimit){
+		$this->notifier = new SleeperNotifier();
+		Server::getInstance()->getTickSleeper()->addNotifier($this->notifier, function() : void{
+			assert($this->dataConnector instanceof DataConnectorImpl); // otherwise, wtf
+			$this->dataConnector->checkResults();
+		});
+
+		$this->workerFactory = $workerFactory;
+		$this->workerLimit = $workerLimit;
+		$this->bufferSend = new QuerySendQueue();
+		$this->bufferRecv = new QueryRecvQueue();
+
+		$this->addWorker();
+	}
+
+	private function addWorker() : void{
+		$this->workers[] = ($this->workerFactory)($this->notifier, $this->bufferSend, $this->bufferRecv);
+	}
+
+	public function join() : void{
+		foreach($this->workers as $worker){
+			$worker->join();
+		}
+	}
+
+	public function stopRunning() : void{
+		foreach($this->workers as $worker){
+			$worker->stopRunning();
+		}
+	}
+
+	public function addQuery(int $queryId, int $mode, string $query, array $params) : void{
+		$this->bufferSend->scheduleQuery($queryId, $mode, $query, $params);
+
+		// check if we need to increase worker size
+		foreach($this->workers as $worker){
+			if(!$worker->isBusy()){
+				return;
+			}
+		}
+		if(count($this->workers) < $this->workerLimit){
+			$this->addWorker();
+		}
+	}
+
+	public function readResults(array &$callbacks) : void{
+		while($this->bufferRecv->fetchResult($queryId, $result)){
+			if(!isset($callbacks[$queryId])){
+				throw new InvalidArgumentException("Missing handler for query #$queryId");
+			}
+
+			$callbacks[$queryId]($result);
+			unset($callbacks[$queryId]);
+		}
+	}
+
+	public function connCreated() : bool{
+		return $this->workers[0]->connCreated();
+	}
+
+	public function hasConnError() : bool{
+		return $this->workers[0]->hasConnError();
+	}
+
+	public function getConnError() : ?string{
+		return $this->workers[0]->getConnError();
+	}
+
+	public function getLoad() : float{
+		return $this->bufferSend->count() / (float) $this->workerLimit;
+	}
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\base;
+
+use Threaded;
+use function serialize;
+
+class QuerySendQueue extends Threaded{
+	/** @var bool */
+	private $invalidated = false;
+	/** @var Threaded */
+	private $queries;
+
+	public function __construct(){
+		$this->queries = new Threaded();
+	}
+
+	public function scheduleQuery(int $queryId, int $mode, string $query, array $params) : void{
+		if($this->invalidated){
+			throw new QueueShutdownException("You cannot schedule a query on an invalidated queue.");
+		}
+		$this->synchronized(function() use ($queryId, $mode, $query, $params) : void{
+			$this->queries[] = serialize([$queryId, $mode, $query, $params]);
+			$this->notifyOne();
+		});
+	}
+
+	public function fetchQuery() : ?string {
+		return $this->synchronized(function(): ?string {
+			while($this->queries->count() === 0 && !$this->isInvalidated()){
+				$this->wait();
+			}
+			return $this->queries->shift();
+		});
+	}
+
+	public function invalidate() : void {
+		$this->synchronized(function():void{
+			$this->invalidated = true;
+			$this->notify();
+		});
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function isInvalidated(): bool {
+		return $this->invalidated;
+	}
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\base;
+
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlError;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlResult;
+use Threaded;
+use function is_string;
+use function serialize;
+use function unserialize;
+
+class QueryRecvQueue extends Threaded{
+	public function publishResult(int $queryId, SqlResult $result) : void{
+		$this[] = serialize([$queryId, $result]);
+	}
+
+	public function publishError(int $queryId, SqlError $error){
+		$this[] = serialize([$queryId, $error]);
+	}
+
+	public function fetchResult(&$queryId, &$result) : bool{
+		$row = $this->shift();
+		if(is_string($row)){
+			[$queryId, $result] = unserialize($row, ["allowed_classes" => true]);
+			return true;
+		}
+		return false;
+	}
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\base;
+
+use Error;
+use Exception;
+use InvalidArgumentException;
+use pocketmine\plugin\Plugin;
+use pocketmine\utils\Terminal;
+use shock95x\auctionhouse\libs\poggit\libasynql\DataConnector;
+use shock95x\auctionhouse\libs\poggit\libasynql\generic\GenericStatementFileParser;
+use shock95x\auctionhouse\libs\poggit\libasynql\GenericStatement;
+use shock95x\auctionhouse\libs\poggit\libasynql\libasynql;
+use shock95x\auctionhouse\libs\poggit\libasynql\result\SqlChangeResult;
+use shock95x\auctionhouse\libs\poggit\libasynql\result\SqlInsertResult;
+use shock95x\auctionhouse\libs\poggit\libasynql\result\SqlSelectResult;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlError;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlThread;
+use ReflectionClass;
+use TypeError;
+use function array_merge;
+use function array_pop;
+use function count;
+use function is_resource;
+use function json_encode;
+use function str_replace;
+use function usleep;
+
+class DataConnectorImpl implements DataConnector{
+	/** @var Plugin */
+	private $plugin;
+	/** @var SqlThread */
+	private $thread;
+	/** @var bool */
+	private $loggingQueries;
+	/** @var GenericStatement[] */
+	private $queries = [];
+	/** @var callable[] */
+	private $handlers = [];
+	/** @var int */
+	private $queryId = 0;
+	/** @var string|null */
+	private $placeHolder;
+
+	/**
+	 * @param Plugin      $plugin
+	 * @param SqlThread   $thread      the backend SqlThread to connect with
+	 * @param null|string $placeHolder the backend-implementation-dependent placeholder. <code>"?"</code> for mysqli-based backends, <code>null</code> for PDO-based and SQLite3-based backends.
+	 * @param bool        $logQueries
+	 */
+	public function __construct(Plugin $plugin, SqlThread $thread, ?string $placeHolder, bool $logQueries = false){
+		$this->plugin = $plugin;
+		if($thread instanceof SqlThreadPool){
+			$thread->setDataConnector($this);
+		}
+		$this->thread = $thread;
+		$this->loggingQueries = $logQueries;
+		$this->placeHolder = $placeHolder;
+	}
+
+	public function setLoggingQueries(bool $loggingQueries) : void{
+		$this->loggingQueries = !libasynql::isPackaged() && $loggingQueries;
+	}
+
+	public function isLoggingQueries() : bool{
+		return $this->loggingQueries;
+	}
+
+	public function loadQueryFile($fh, string $fileName = null) : void{
+		if(!is_resource($fh)){
+			throw new TypeError("Missing $fileName in resources directory of plugin.");
+		}
+
+		$parser = new GenericStatementFileParser($fileName, $fh);
+		$parser->parse();
+		foreach($parser->getResults() as $result){
+			$this->loadQuery($result);
+		}
+	}
+
+	public function loadQuery(GenericStatement $stmt) : void{
+		if(isset($this->queries[$stmt->getName()])){
+			throw new InvalidArgumentException("Duplicate GenericStatement: {$stmt->getName()}");
+		}
+		$this->queries[$stmt->getName()] = $stmt;
+	}
+
+	public function executeGeneric(string $queryName, array $args = [], ?callable $onSuccess = null, ?callable $onError = null) : void{
+		$this->executeImpl($queryName, $args, SqlThread::MODE_GENERIC, function() use ($onSuccess){
+			if($onSuccess !== null){
+				$onSuccess();
+			}
+		}, $onError);
+	}
+
+	public function executeGenericRaw(string $query, array $args = [], ?callable $onSuccess = null, ?callable $onError = null) : void{
+		$this->executeImplRaw($query, $args, SqlThread::MODE_GENERIC, function() use ($onSuccess){
+			if($onSuccess !== null){
+				$onSuccess();
+			}
+		}, $onError);
+	}
+
+	public function executeChange(string $queryName, array $args = [], ?callable $onSuccess = null, ?callable $onError = null) : void{
+		$this->executeImpl($queryName, $args, SqlThread::MODE_CHANGE, function(SqlChangeResult $result) use ($onSuccess){
+			if($onSuccess !== null){
+				$onSuccess($result->getAffectedRows());
+			}
+		}, $onError);
+	}
+
+	public function executeChangeRaw(string $query, array $args = [], ?callable $onSuccess = null, ?callable $onError = null) : void{
+		$this->executeImplRaw($query, $args, SqlThread::MODE_CHANGE, function(SqlChangeResult $result) use ($onSuccess){
+			if($onSuccess !== null){
+				$onSuccess($result->getAffectedRows());
+			}
+		}, $onError);
+	}
+
+	public function executeInsert(string $queryName, array $args = [], ?callable $onInserted = null, ?callable $onError = null) : void{
+		$this->executeImpl($queryName, $args, SqlThread::MODE_INSERT, function(SqlInsertResult $result) use ($onInserted){
+			if($onInserted !== null){
+				$onInserted($result->getInsertId(), $result->getAffectedRows());
+			}
+		}, $onError);
+	}
+
+	public function executeInsertRaw(string $query, array $args = [], ?callable $onInserted = null, ?callable $onError = null) : void{
+		$this->executeImplRaw($query, $args, SqlThread::MODE_INSERT, function(SqlInsertResult $result) use ($onInserted){
+			if($onInserted !== null){
+				$onInserted($result->getInsertId(), $result->getAffectedRows());
+			}
+		}, $onError);
+	}
+
+	public function executeSelect(string $queryName, array $args = [], ?callable $onSelect = null, ?callable $onError = null) : void{
+		$this->executeImpl($queryName, $args, SqlThread::MODE_SELECT, function(SqlSelectResult $result) use ($onSelect){
+			if($onSelect !== null){
+				$onSelect($result->getRows(), $result->getColumnInfo());
+			}
+		}, $onError);
+	}
+
+	public function executeSelectRaw(string $query, array $args = [], ?callable $onSelect = null, ?callable $onError = null) : void{
+		$this->executeImplRaw($query, $args, SqlThread::MODE_SELECT, function(SqlSelectResult $result) use ($onSelect){
+			if($onSelect !== null){
+				$onSelect($result->getRows(), $result->getColumnInfo());
+			}
+		}, $onError);
+	}
+
+	private function executeImpl(string $queryName, array $args, int $mode, callable $handler, ?callable $onError) : void{
+		if(!isset($this->queries[$queryName])){
+			throw new InvalidArgumentException("The query $queryName has not been loaded");
+		}
+		$query = $this->queries[$queryName]->format($args, $this->placeHolder, $outArgs);
+
+		$this->executeImplRaw($query, $outArgs, $mode, $handler, $onError);
+	}
+
+	private function executeImplRaw(string $query, array $args, int $mode, callable $handler, ?callable $onError) : void{
+		$queryId = $this->queryId++;
+		$trace = libasynql::isPackaged() ? null : new Exception("(This is the original stack trace for the following error)");
+		$this->handlers[$queryId] = function($result) use ($handler, $onError, $trace){
+			if($result instanceof SqlError){
+				$this->reportError($onError, $result, $trace);
+			}else{
+				try{
+					$handler($result);
+				}catch(Exception $e){
+					if(!libasynql::isPackaged()){
+						$prop = (new ReflectionClass(Exception::class))->getProperty("trace");
+						$prop->setAccessible(true);
+						$newTrace = $prop->getValue($e);
+						$oldTrace = $prop->getValue($trace);
+						for($i = count($newTrace) - 1, $j = count($oldTrace) - 1; $i >= 0 && $j >= 0 && $newTrace[$i] === $oldTrace[$j]; --$i, --$j){
+							array_pop($newTrace);
+						}
+						/** @noinspection PhpUndefinedMethodInspection */
+						$prop->setValue($e, array_merge($newTrace, [
+							[
+								"function" => Terminal::$COLOR_YELLOW . "--- below is the original stack trace ---" . Terminal::$FORMAT_RESET,
+							],
+						], $oldTrace));
+					}
+					throw $e;
+				}catch(Error $e){
+					if(!libasynql::isPackaged()){
+						$exceptionProperty = (new ReflectionClass(Exception::class))->getProperty("trace");
+						$exceptionProperty->setAccessible(true);
+						$oldTrace = $exceptionProperty->getValue($trace);
+
+						$errorProperty = (new ReflectionClass(Error::class))->getProperty("trace");
+						$errorProperty->setAccessible(true);
+						$newTrace = $errorProperty->getValue($e);
+
+						for($i = count($newTrace) - 1, $j = count($oldTrace) - 1; $i >= 0 && $j >= 0 && $newTrace[$i] === $oldTrace[$j]; --$i, --$j){
+							array_pop($newTrace);
+						}
+						/** @noinspection PhpUndefinedMethodInspection */
+						$errorProperty->setValue($e, array_merge($newTrace, [
+							[
+								"function" => Terminal::$COLOR_YELLOW . "--- below is the original stack trace ---" . Terminal::$FORMAT_RESET,
+							],
+						], $oldTrace));
+					}
+					throw $e;
+				}
+			}
+		};
+		if($this->loggingQueries){
+			$this->plugin->getLogger()->debug("Queuing mode-$mode query: " . str_replace(["\r\n", "\n"], "\\n ", $query) . " | Args: " . json_encode($args));
+		}
+		$this->thread->addQuery($queryId, $mode, $query, $args);
+	}
+
+	private function reportError(?callable $default, SqlError $error, ?Exception $trace) : void{
+		if($default !== null){
+			try{
+				$default($error, $trace);
+				$error = null;
+			}catch(SqlError $err){
+				$error = $err;
+			}
+		}
+		if($error !== null){
+			$this->plugin->getLogger()->error($error->getMessage());
+			if($error->getQuery() !== null){
+				$this->plugin->getLogger()->debug("Query: " . $error->getQuery());
+			}
+			if($error->getArgs() !== null){
+				$this->plugin->getLogger()->debug("Args: " . json_encode($error->getArgs()));
+			}
+			if($trace !== null){
+				$this->plugin->getLogger()->debug("Stack trace: " . $trace->getTraceAsString());
+			}
+		}
+	}
+
+	public function waitAll() : void{
+		while(!empty($this->handlers)){
+			$this->checkResults();
+			usleep(1000);
+		}
+	}
+
+	public function checkResults() : void{
+		$this->thread->readResults($this->handlers);
+	}
+
+	public function close() : void{
+		$this->thread->stopRunning();
+	}
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql;
+
+use InvalidArgumentException;
+use shock95x\auctionhouse\libs\poggit\libasynql\generic\GenericStatementFileParseException;
+
+/**
+ * Represents a database connection or a group of database connections
+ */
+interface DataConnector{
+	/**
+	 * Sets whether the queries are being logged. Only effective when libasynql is not packaged; does nothing if libasynql is packaged.
+	 *
+	 * @param bool $loggingQueries
+	 */
+	public function setLoggingQueries(bool $loggingQueries) : void;
+
+	/**
+	 * Returns whether the queries are being logged. Always returns false when libasynql is packaged.
+	 *
+	 * @return bool
+	 */
+	public function isLoggingQueries() : bool;
+
+	/**
+	 * Loads pre-formatted queries from a readable stream resource.
+	 *
+	 * The implementation will close the stream after reading.
+	 *
+	 * @param resource $fh       a stream that supports <code>feof()</code>, <code>fgets()</code> and <code>fclose()</code>.
+	 * @param string   $fileName the filename providing the stream, only used for debugging and documentation purposes
+	 *
+	 * @throws GenericStatementFileParseException if the file contains a syntax error or compile error
+	 * @throws InvalidArgumentException if the file introduces statements that duplicate the names of those previously loaded
+	 */
+	public function loadQueryFile($fh, string $fileName = null) : void;
+
+	/**
+	 * Loads a pre-formatted query.
+	 *
+	 * @param GenericStatement $stmt
+	 *
+	 * @throws InvalidArgumentException if the statement duplicates the name of one previously loaded
+	 */
+	public function loadQuery(GenericStatement $stmt) : void;
+
+	/**
+	 * Executes a generic query that either succeeds or fails.
+	 *
+	 * @param string        $queryName the {@link GenericPreparedStatement} query name
+	 * @param mixed[]       $args      the variables as defined in the {@link GenericPreparedStatement}
+	 * @param callable|null $onSuccess an optional callback when the query has succeeded: <code>function() : void{}</code>
+	 * @param callable|null $onError   an optional callback when the query has failed: <code>function({@link SqlError} $error) : void{}</code>
+	 */
+	public function executeGeneric(string $queryName, array $args = [], ?callable $onSuccess = null, ?callable $onError = null) : void;
+
+	public function executeGenericRaw(string $query, array $args = [], ?callable $onSuccess = null, ?callable $onError = null) : void;
+
+	/**
+	 * Executes a query that changes data.
+	 *
+	 * @param string        $queryName the {@link GenericPreparedStatement} query name
+	 * @param mixed[]       $args      the variables as defined in the {@link GenericPreparedStatement}
+	 * @param callable|null $onSuccess an optional callback when the query has succeeded: <code>function(int $affectedRows) : void{}</code>
+	 * @param callable|null $onError   an optional callback when the query has failed: <code>function({@link SqlError} $error) : void{}</code>
+	 */
+	public function executeChange(string $queryName, array $args = [], ?callable $onSuccess = null, ?callable $onError = null) : void;
+
+	public function executeChangeRaw(string $query, array $args = [], ?callable $onSuccess = null, ?callable $onError = null) : void;
+
+	/**
+	 * Executes an insert query that results in an insert ID.
+	 *
+	 * @param string        $queryName  the {@link GenericPreparedStatement} query name
+	 * @param mixed[]       $args       the variables as defined in the {@link GenericPreparedStatement}
+	 * @param callable|null $onInserted an optional callback when the query has succeeded: <code>function(int $insertId, int $affectedRows) : void{}</code>
+	 * @param callable|null $onError    an optional callback when the query has failed: <code>function({@link SqlError} $error) : void{}</code>
+	 */
+	public function executeInsert(string $queryName, array $args = [], ?callable $onInserted = null, ?callable $onError = null) : void;
+
+	public function executeInsertRaw(string $query, array $args = [], ?callable $onInserted = null, ?callable $onError = null) : void;
+
+	/**
+	 * Executes a select query that returns an SQL result set. This does not strictly need to be SELECT queries -- reflection queries like MySQL's <code>SHOW TABLES</code> query are also allowed.
+	 *
+	 * @param string        $queryName the {@link GenericPreparedStatement} query name
+	 * @param mixed[]       $args      the variables as defined in the {@link GenericPreparedStatement}
+	 * @param callable|null $onSelect  an optional callback when the query has succeeded: <code>function(array[] $rows, {@link SqlColumnInfo} $columns) : void{}</code>
+	 * @param callable|null $onError   an optional callback when the query has failed: <code>function({@link SqlError} $error) : void{}</code>
+	 */
+	public function executeSelect(string $queryName, array $args = [], ?callable $onSelect = null, ?callable $onError = null) : void;
+
+	public function executeSelectRaw(string $query, array $args = [], ?callable $onSelect = null, ?callable $onError = null) : void;
+
+	/**
+	 * This function waits all pending queries to complete then returns. This is as if the queries were executed in blocking mode (not async).
+	 *
+	 * This method should only under very rare events like server start/stop. This should not be run trivially (e.g. every time player joins), because otherwise this is not async.
+	 */
+	public function waitAll() : void;
+
+	/**
+	 * Closes the connection and/or all child connections. Remember to call this method when the plugin is disabled or the data provider is switched.
+	 */
+	public function close() : void;
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\generic;
+
+use InvalidArgumentException;
+use shock95x\auctionhouse\libs\poggit\libasynql\GenericStatement;
+use function array_pop;
+use function assert;
+use function count;
+use function fclose;
+use function fgets;
+use function implode;
+use function ltrim;
+use function preg_split;
+use function strpos;
+use function substr;
+use function trim;
+use const PREG_SPLIT_NO_EMPTY;
+use const PREG_SPLIT_OFFSET_CAPTURE;
+
+class GenericStatementFileParser{
+	/** @var string|null */
+	private $fileName;
+	/** @var resource */
+	private $fh;
+	/** @var int */
+	private $lineNo = 0;
+
+	/** @var string[] */
+	private $identifierStack = [];
+	/** @var bool */
+	private $parsingQuery = false;
+	/** @var string[] */
+	private $docLines = [];
+	/** @var GenericVariable[] */
+	private $variables = [];
+	/** @var string[] */
+	private $buffer = [];
+
+	/** @var string|null */
+	private $knownDialect = null;
+	/** @var GenericStatement[] */
+	private $results = [];
+
+	/**
+	 * @param string|null $fileName
+	 * @param resource    $fh
+	 */
+	public function __construct(?string $fileName, $fh){
+		$this->fileName = $fileName;
+		$this->fh = $fh;
+	}
+
+	/**
+	 * Parses the file, and closes the stream.
+	 *
+	 * @throws GenericStatementFileParseException if the file contains a syntax error or compile error
+	 */
+	public function parse() : void{
+		try{
+			while(($line = fgets($this->fh)) !== false){
+				$this->readLine($this->lineNo + 1, $line);
+			}
+			if(!empty($this->identifierStack)){
+				$this->error("Unexpected end of file, " . count($this->identifierStack) . " groups not closed");
+			}
+		}finally{
+			fclose($this->fh);
+		}
+	}
+
+	/**
+	 * @return GenericStatement[]
+	 */
+	public function getResults() : array{
+		return $this->results;
+	}
+
+	private function readLine(int $lineNo, string $line) : void{
+		$this->lineNo = $lineNo; // In fact I don't need this parameter. I just want to get the line number onto the stack trace.
+		$line = trim($line);
+
+		if($line === ""){
+			return;
+		}
+
+		if($this->tryCommand($line)){
+			return;
+		}
+
+		if(empty($this->identifierStack)){
+			$this->error("Unexpected query text; start a query with { first");
+		}
+		$this->buffer[] = $line;
+		$this->parsingQuery = true;
+	}
+
+	private function tryCommand(string $line) : bool{
+		if(strpos($line, "-- #") !== 0){
+			return false;
+		}
+
+		$line = ltrim(substr($line, 4));
+		if($line === ''){
+			return true;
+		}
+		$cmd = $line{0};
+		$args = [];
+		$argOffsets = [];
+		$regex = /** @lang RegExp */
+			'/[ \t]/';
+		foreach(preg_split($regex, substr($line, 1), -1, PREG_SPLIT_NO_EMPTY | PREG_SPLIT_OFFSET_CAPTURE) as [$arg, $offset]){
+			$args[] = $arg;
+			$argOffsets[] = $offset;
+		}
+
+		switch($cmd){
+			case "!":
+				$this->dialectCommand($args);
+				return true;
+			case "{":
+				$this->startCommand($args);
+				return true;
+			case "}":
+				$this->endCommand();
+				return true;
+			case "*":
+				$this->docCommand($args, $line, $argOffsets);
+				return true;
+			case ":":
+				$this->varCommand($args, $line, $argOffsets);
+				return true;
+		}
+
+		return true;
+	}
+
+	private function dialectCommand(array $args) : void{
+		// dialect command
+		if($this->knownDialect !== null){
+			$this->error("Dialect declared more than once");
+		}
+
+		if(!isset($args[0])){
+			$this->error("Missing operand: DIALECT");
+		}
+
+		$this->knownDialect = $args[0];
+	}
+
+	private function startCommand(array $args) : void{
+		if($this->knownDialect === null){
+			$this->error("Dialect declaration must be the very first line");
+		}
+
+		if($this->parsingQuery){
+			$this->error("Unexpected {, close previous query first");
+		}
+
+		if(!isset($args[0])){
+			$this->error("Missing operand: IDENTIFIER_NAME");
+		}
+
+		$this->identifierStack[] = $args[0];
+	}
+
+	private function endCommand() : void{
+		if(count($this->identifierStack) === 0){
+			$this->error("No matching { for }");
+		}
+
+		if($this->parsingQuery){
+			if(count($this->buffer) === 0){
+				$this->error("Documentation/Variables are declared but no query is provided");
+			}
+
+			$query = implode("\n", $this->buffer);
+			$doc = implode("\n", $this->docLines); // double line breaks => single line breaks
+			assert($this->knownDialect !== null);
+			$stmt = GenericStatementImpl::forDialect($this->knownDialect, implode(".", $this->identifierStack), $query, $doc, $this->variables, $this->fileName, $this->lineNo);
+			$this->docLines = [];
+			$this->variables = [];
+			$this->buffer = [];
+			$this->parsingQuery = false;
+
+			if(isset($this->results[$stmt->getName()])){
+				$this->error("Duplicate query name ({$stmt->getName()})");
+			}
+			$this->results[$stmt->getName()] = $stmt;
+		} // end query
+
+		array_pop($this->identifierStack);
+	}
+
+	private function varCommand(array $args, string $line, array $argOffsets) : void{
+		if(empty($this->identifierStack)){
+			$this->error("Unexpected variable declaration; start a query with { first");
+		}
+
+		if(!isset($args[1])){
+			$this->error("Missing operand: VAR_TYPE");
+		}
+
+		try{
+			$var = new GenericVariable($args[0], $args[1], isset($args[2]) ? substr($line, $argOffsets[2] + 1) : null);
+		}catch(InvalidArgumentException $e){
+			throw $this->error($e->getMessage());
+		}
+		if(isset($this->variables[$var->getName()])){
+			$this->error("Duplicate variable definition of :{$var->getName()}");
+		}
+		$this->variables[$var->getName()] = $var;
+		$this->parsingQuery = true;
+	}
+
+	private function docCommand(array $args, string $line, array $argOffsets) : void{
+		if(empty($this->identifierStack)){
+			$this->error("Unexpected documentation; start a query with { first");
+		}
+
+		$this->docLines[] = trim(substr($line, 1));
+		$this->parsingQuery = true;
+	}
+
+	/**
+	 * @param string $problem
+	 * @return GenericStatementFileParseException
+	 * @throw GenericStatementFileParseException
+	 */
+	private function error(string $problem) : GenericStatementFileParseException{
+		throw new GenericStatementFileParseException($problem, $this->lineNo, $this->fileName);
+	}
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\generic;
+
+use AssertionError;
+use InvalidArgumentException;
+use JsonSerializable;
+use shock95x\auctionhouse\libs\poggit\libasynql\GenericStatement;
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlDialect;
+use function array_key_exists;
+use function get_class;
+use function gettype;
+use function in_array;
+use function is_object;
+use function mb_strlen;
+use function mb_strpos;
+use function mb_substr;
+use function str_replace;
+use function uksort;
+
+abstract class GenericStatementImpl implements GenericStatement, JsonSerializable{
+	/** @var string */
+	protected $name;
+	/** @var string */
+	protected $query;
+	/** @var string */
+	protected $doc;
+	/** @var GenericVariable[] */
+	protected $variables;
+	/** @var string|null */
+	protected $file;
+	/** @var int */
+	protected $lineNo;
+
+	/** @var string[] */
+	protected $varPositions = [];
+
+	public function getName() : string{
+		return $this->name;
+	}
+
+	public function getQuery() : string{
+		return $this->query;
+	}
+
+	public function getDoc() : string{
+		return $this->doc;
+	}
+
+	public function getVariables() : array{
+		return $this->variables;
+	}
+
+	public function getFile() : ?string{
+		return $this->file;
+	}
+
+	public function getLineNumber() : int{
+		return $this->lineNo;
+	}
+
+	/**
+	 * @param string            $dialect
+	 * @param string            $name
+	 * @param string            $query
+	 * @param string            $doc
+	 * @param GenericVariable[] $variables
+	 * @param string|null       $file
+	 * @param int               $lineNo
+	 * @return GenericStatementImpl
+	 */
+	public static function forDialect(string $dialect, string $name, string $query, string $doc, array $variables, ?string $file, int $lineNo) : GenericStatementImpl{
+		static $classMap = [
+			SqlDialect::MYSQL => MysqlStatementImpl::class,
+			SqlDialect::SQLITE => SqliteStatementImpl::class,
+		];
+		$className = $classMap[$dialect];
+		return new $className($name, $query, $doc, $variables, $file, $lineNo);
+	}
+
+	public function __construct(string $name, string $query, string $doc, array $variables, ?string $file, int $lineNo){
+		$this->name = $name;
+		$this->query = $query;
+		$this->doc = $doc;
+		$this->variables = $variables;
+		$this->file = str_replace("\\", "/", $file);
+		$this->lineNo = $lineNo;
+
+		$this->compilePositions();
+	}
+
+	protected function compilePositions() : void{
+		uksort($this->variables, function($s1, $s2){
+			return mb_strlen($s2) <=> mb_strlen($s1);
+		});
+
+		$usedNames = [];
+
+		$positions = [];
+		$quotesState = null;
+		for($i = 1, $iMax = mb_strlen($this->query); $i < $iMax; ++$i){
+			$thisChar = mb_substr($this->query, $i, 1);
+
+			if($quotesState !== null){
+				if($thisChar === "\\"){
+					++$i; // skip one character
+					continue;
+				}
+				if($thisChar === $quotesState){
+					$quotesState = null;
+					continue;
+				}
+				continue;
+			}
+			if(in_array($thisChar, ["'", "\"", "`"], true)){
+				$quotesState = $thisChar;
+				continue;
+			}
+
+			if($thisChar === ":"){
+				$name = null;
+
+				foreach($this->variables as $variable){
+					if(mb_strpos($this->query, $variable->getName(), $i + 1) === $i + 1){
+						$positions[$i] = $name = $variable->getName();
+						break;
+						// if multiple variables match, the first one i.e. the longest one wins
+					}
+				}
+
+				if($name !== null){
+					$usedNames[$name] = true;
+					$i += mb_strlen($name); // skip the name
+				}
+			}
+		}
+
+		$newQuery = "";
+		$lastPos = 0;
+		foreach($positions as $pos => $name){
+			$newQuery .= mb_substr($this->query, $lastPos, $pos - $lastPos);
+			$this->varPositions[mb_strlen($newQuery)] = $name; // we aren't using $pos here, because we want the position in the cleaned string, not the position in the original query string
+			$lastPos = $pos + mb_strlen($name) + 1;
+		}
+		$newQuery .= mb_substr($this->query, $lastPos);
+
+		$this->query = $newQuery;
+
+		foreach($this->variables as $variable){
+			if(!isset($usedNames[$variable->getName()])){
+				throw new InvalidArgumentException("The variable {$variable->getName()} is not used anywhere in the query! Check for typos.");
+			}
+		}
+	}
+
+	public function format(array $vars, ?string $placeHolder, ?array &$outArgs) : string{
+		$outArgs = [];
+		foreach($this->variables as $variable){
+			if(!$variable->isOptional() && !array_key_exists($variable->getName(), $vars)){
+				throw new InvalidArgumentException("Missing required variable {$variable->getName()}");
+			}
+		}
+
+		$query = "";
+
+		$lastPos = 0;
+		foreach($this->varPositions as $pos => $name){
+			$query .= mb_substr($this->query, $lastPos, $pos - $lastPos);
+			$value = $vars[$name] ?? $this->variables[$name]->getDefault();
+			try{
+				$query .= $this->formatVariable($this->variables[$name], $value, $placeHolder, $outArgs);
+			}catch(AssertionError $e){
+				throw new InvalidArgumentException("Invalid value for :$name - " . $e->getMessage() . ",  " . self::getType($value) . " given", 0, $e);
+			}
+			$lastPos = $pos;
+		}
+		$query .= mb_substr($this->query, $lastPos);
+
+		return $query;
+	}
+
+	private static function getType($value){
+		return is_object($value) ? get_class($value) : gettype($value);
+	}
+
+	protected abstract function formatVariable(GenericVariable $variable, $value, ?string $placeHolder, array &$outArgs) : string;
+
+	public function jsonSerialize(){
+		return [
+			"name" => $this->name,
+			"query" => $this->query,
+			"doc" => $this->doc,
+			"variables" => $this->variables,
+			"file" => $this->file,
+			"lineNo" => $this->lineNo,
+		];
+	}
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql;
+
+use shock95x\auctionhouse\libs\poggit\libasynql\generic\GenericVariable;
+
+interface GenericStatement{
+	/**
+	 * Returns the dialect this query is intended for.
+	 *
+	 * @return string one of the constants in {@link SqlDialect}
+	 */
+	public function getDialect() : string;
+
+	/**
+	 * Returns the identifier name of this query
+	 *
+	 * @return string
+	 */
+	public function getName() : string;
+
+	public function getQuery() : string;
+
+	public function getDoc() : string;
+
+	/**
+	 * Returns the variables required by this statement
+	 *
+	 * @return GenericVariable[]
+	 */
+	public function getVariables() : array;
+
+	public function getFile() : ?string;
+
+	public function getLineNumber() : int;
+
+	/**
+	 * Creates a query based on the args and the backend
+	 *
+	 * @param mixed[]     $vars        the input arguments
+	 * @param string|null $placeHolder the backend-dependent variable placeholder constant, if any
+	 * @param mixed[]     &$outArgs    will be filled with the variables to be passed to the backend
+	 * @return string
+	 */
+	public function format(array $vars, ?string $placeHolder, ?array &$outArgs) : string;
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql;
+
+interface SqlDialect{
+	public const SQLITE = "sqlite";
+	public const MYSQL = "mysql";
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\generic;
+
+use InvalidArgumentException;
+use RuntimeException;
+use SQLite3;
+use function array_map;
+use function assert;
+use function bin2hex;
+use function implode;
+use function is_array;
+use function is_bool;
+use function is_float;
+use function is_int;
+use function is_string;
+use function strpos;
+
+class SqliteStatementImpl extends GenericStatementImpl{
+	public function getDialect() : string{
+		return "sqlite";
+	}
+
+	protected function formatVariable(GenericVariable $variable, $value, ?string $placeHolder, array &$outArgs) : string{
+		if($variable->isList()){
+			assert(is_array($value));
+
+			// IN () works with SQLite3.
+			$unlist = $variable->unlist();
+			return "(" . implode(",", array_map(function($value) use ($placeHolder, $unlist, &$outArgs){
+					return $this->formatVariable($unlist, $value, $placeHolder, $outArgs);
+				}, $value)) . ")";
+		}
+		
+		if($value === null){
+			if(!$variable->isNullable()){
+				throw new InvalidArgumentException("The variable :{$variable->getName()} is not nullable");
+			}
+
+			return "NULL";
+		}
+
+		switch($variable->getType()){
+			case GenericVariable::TYPE_BOOL:
+				assert(is_bool($value));
+				return $value ? "1" : "0";
+
+			case GenericVariable::TYPE_INT:
+				assert(is_int($value));
+				return (string) $value;
+
+			case GenericVariable::TYPE_FLOAT:
+				assert(is_int($value) || is_float($value));
+				return (string) $value;
+
+			case GenericVariable::TYPE_STRING:
+				assert(is_string($value));
+				if(strpos($value, "\0") !== false){
+					return "X'" . bin2hex($value) . "'";
+				}
+				return "'" . SQLite3::escapeString($value) . "'";
+		}
+
+		throw new RuntimeException("Unsupported variable type");
+	}
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\generic;
+
+use InvalidArgumentException;
+use InvalidStateException;
+use JsonSerializable;
+use function assert;
+use function in_array;
+use function is_string;
+use function json_decode;
+use function stripos;
+use function strlen;
+use function strpos;
+use function strtoupper;
+use function substr;
+
+/**
+ * Represents a variable that can be passed into {@link GenericStatement::format()}
+ */
+class GenericVariable implements JsonSerializable{
+	public const TYPE_STRING = "string";
+	public const TYPE_INT = "int";
+	public const TYPE_FLOAT = "float";
+	public const TYPE_BOOL = "bool";
+	public const TYPE_TIMESTAMP = "timestamp";
+
+	public const TIME_0 = "0";
+	public const TIME_NOW = "NOW";
+
+	protected $name;
+	protected $list = false;
+	protected $canEmpty = false;
+	protected $nullable = false;
+	protected $type;
+	/** @var string|int|float|bool|null */
+	protected $default = null;
+
+	public function __construct(string $name, string $type, ?string $default){
+		if(strpos($name, ":") !== false){
+			throw new InvalidArgumentException("Colon is disallowed in a variable name");
+		}
+		$this->name = $name;
+		if(stripos($type, "list:") === 0){
+			$this->list = true;
+			/** @noinspection CallableParameterUseCaseInTypeContextInspection */
+			$type = substr($type, strlen("list:"));
+		}elseif(stripos($type, "list?") === 0){
+			$this->list = true;
+			$this->canEmpty = true;
+			/** @noinspection CallableParameterUseCaseInTypeContextInspection */
+			$type = substr($type, strlen("list?"));
+		}elseif($type{0} === "?"){
+			$this->nullable = true;
+			$type = substr($type, 1);
+		}
+		$this->type = $type;
+		if($default !== null){
+			if($this->list){
+				throw new InvalidArgumentException("Lists cannot have default value");
+			}
+			switch($type){
+				case self::TYPE_STRING:
+					if($default{0} === "\"" && $default{strlen($default) - 1} === "\""){
+						$default = json_decode($default);
+						assert(is_string($default));
+					}
+					$this->default = $default;
+					break;
+
+				case self::TYPE_INT:
+					$this->default = (int) $default;
+					break;
+
+				case self::TYPE_FLOAT:
+					$this->default = (float) $default;
+					break;
+
+				case self::TYPE_BOOL:
+					$this->default = in_array($default, ["true", "on", "1"], true);
+					break;
+
+				case self::TYPE_TIMESTAMP:
+					if(!in_array(strtoupper($default), [
+						self::TIME_NOW,
+						self::TIME_0,
+					], true)){
+						throw new InvalidArgumentException("Invalid timestamp default");
+					}
+					$this->default = $default;
+
+				default:
+					throw new InvalidArgumentException("Unknown type \"$type\"");
+			}
+		}
+	}
+
+	public function unlist() : GenericVariable{
+		if(!$this->list){
+			throw new InvalidStateException("Cannot unlist a non-list variable");
+		}
+		$clone = clone $this;
+		$clone->list = false;
+		return $clone;
+	}
+
+	public function getName() : string{
+		return $this->name;
+	}
+
+	public function isList() : bool{
+		return $this->list;
+	}
+
+	/**
+	 * Returns whether the list variable is declared with <code>list?</code> rather than <code>list:</code>.
+	 *
+	 * If the SQL dialect does not support empty list declarations <code>()</code>, and <code>list:</code> is used, an exception will be thrown when an empty array is passed as the value. If <code>list?</code> is used, a randomly-generated string will be filled into the array to satisfy the language's requirements. This might cause undesired behaviour unless you are only using this variable for a simple <code>IN :list</code> condition.
+	 *
+	 * As this may expose a security breach or a performance degrade, plugins are not encouraged to use this method. Instead it is more desirable to check if the array is empty before passing the value into libasynql.
+	 *
+	 * @return bool
+	 */
+	public function canBeEmpty() : bool{
+		if(!$this->list){
+			throw new InvalidStateException("canBeEmpty() is only available for list variables");
+		}
+
+		return $this->canEmpty;
+	}
+
+	public function isNullable() : bool{
+		return $this->nullable;
+	}
+
+	public function getType() : string{
+		return $this->type;
+	}
+
+	/**
+	 * @return mixed
+	 */
+	public function getDefault(){
+		return $this->default;
+	}
+
+	public function isOptional() : bool{
+		return $this->default !== null;
+	}
+
+	public function equals(GenericVariable $that, &$diff = null) : bool{
+		if($this->name !== $that->name){
+			$diff = "name";
+			return false;
+		}
+		if($this->list !== $that->list){
+			$diff = "isList";
+			return false;
+		}
+		if($this->canEmpty !== $that->canEmpty){
+			$diff = "canBeEmpty";
+			return false;
+		}
+		if($this->type !== $that->type){
+			$diff = "type";
+			return false;
+		}
+		if($this->default !== $that->default){
+			$diff = "defaultValue";
+			return false;
+		}
+		return true;
+	}
+
+	public function jsonSerialize(){
+		return [
+			"name" => $this->name,
+			"isList" => $this->list,
+			"canEmpty" => $this->canEmpty,
+			"type" => $this->type,
+			"default" => $this->default,
+		];
+	}
+}
+<?php
+namespace shock95x\auctionhouse\database;
+
+class Query {
+
+	const INIT = "auctionhouse.init";
+	const INSERT = "auctionhouse.insert";
+	const DELETE = "auctionhouse.delete";
+	const FETCH_ALL = "auctionhouse.fetch.all";
+}<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql;
+
+class SqlResult{
+
+}
+<?php
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\database\utils;
+
+final class BinaryStringParser{
+
+	public static function fromDatabase(string $type) : BinaryStringParserInstance{
+		switch($type){
+			case "mysql":
+				return new MySQLBinaryStringParser();
+			case "sqlite":
+				return new SQLiteBinaryStringParser();
+		}
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\database\utils;
+
+class SQLiteBinaryStringParser implements BinaryStringParserInstance{
+
+	public function encode(string $string) : string{
+		return bin2hex($string);
+	}
+
+	public function decode(string $string) : string{
+		return hex2bin($string);
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\database\utils;
+
+interface BinaryStringParserInstance{
+
+	public function encode(string $string) : string;
+
+	public function decode(string $string) : string;
+}<?php
+namespace shock95x\auctionhouse\database;
+
+use shock95x\auctionhouse\auction\Listing;
+use shock95x\auctionhouse\AuctionHouse;
+use shock95x\auctionhouse\event\AuctionStartEvent;
+use shock95x\auctionhouse\task\ListingExpireTask;
+use shock95x\auctionhouse\utils\Utils;
+use pocketmine\Player;
+use shock95x\auctionhouse\libs\SOFe\AwaitGenerator\Await;
+
+class DataHolder {
+
+	/** @var Listing[] */
+	private static $listings;
+	private static $database;
+
+	public function __construct(Database $database) {
+		self::$database = $database;
+	}
+
+	public function loadListings() {
+		self::$listings = array();
+		Await::f2c(function () {
+			$rows = (array) yield self::$database->fetchAll();
+			foreach($rows as $listing) {
+				self::$listings[] = new Listing($listing, self::$database->getParser());
+			}
+		});
+		DataHolder::$database->getConnector()->waitAll();
+		AuctionHouse::getInstance()->getScheduler()->scheduleRepeatingTask(new ListingExpireTask(DataHolder::$database), 6000);
+	}
+
+	/**
+	 * @param Player $player
+	 * @param bool $expired
+	 * @return Listing[]
+	 */
+	public static function getListingsByPlayer(Player $player, bool $expired = false) {
+		$array = [];
+		foreach((array) self::$listings as $listing) {
+			if($listing->getSeller(true) == $player->getRawUniqueId()) {
+				if($expired) {
+					if($listing->isExpired()) {
+						$array[] = $listing;
+					}
+				} else {
+					if(!$listing->isExpired()) {
+						$array[] = $listing;
+					}
+				}
+			}
+		}
+		return $array;
+	}
+
+	/**
+	 * @param int $id
+	 * @return Listing
+	 */
+	public static function getListingById(int $id) : Listing {
+		foreach((array) self::$listings as $listing) {
+			if($listing->getMarketId() == $id) {
+				return $listing;
+			}
+		}
+		return null;
+	}
+
+	public static function addListing(Player $player, int $price, string $nbt) {
+		$listing = new Listing(["uuid" => $player->getRawUniqueId(), "username" => $player->getName(), "price" => $price, "nbt" => self::$database->getParser()->encode($nbt), "id" => time(), "end_time" => Utils::getEndTime(), "expired" => false],  self::$database->getParser());
+		self::$listings[] = $listing;
+		(new AuctionStartEvent($listing))->call();
+	}
+
+	/**
+	 * @param bool $expired
+	 * @return Listing[]
+	 */
+	public static function getListings(bool $expired = false) {
+		if(!$expired) {
+			$array = [];
+			foreach ((array)self::$listings as $listing) {
+				if(!$listing->isExpired()) {
+					$array[] = $listing;
+				}
+			}
+			return $array;
+		}
+		return self::$listings;
+	}
+
+	public static function removeAuction(Listing $auction) {
+		$index = array_search($auction, (array) self::$listings);
+		if($index !== false){
+			unset(self::$listings[$index]);
+		}
+		self::$database->deleteFromId($auction->getMarketId());
+	}
+}<?php
+
+/*
+ * await-generator
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\SOFe\AwaitGenerator;
+
+use Error;
+use Exception;
+use Generator;
+use ReflectionClass;
+use ReflectionGenerator;
+use Throwable;
+use function array_merge;
+use function assert;
+use function count;
+use function is_a;
+use function is_callable;
+
+class Await extends PromiseState{
+	public const RESOLVE = "resolve";
+	public const RESOLVE_MULTI = [Await::RESOLVE];
+	public const REJECT = "reject";
+	public const ONCE = "once";
+	public const ALL = "all";
+	public const RACE = "race";
+
+	/**
+	 * @deprecated This value is no longer used.
+	 * @var bool
+	 */
+	public static $debug = true;
+
+	/** @var bool */
+	private $ultimate;
+	/** @var Generator */
+	protected $generator;
+	/** @var callable|null */
+	protected $onComplete;
+	/**
+	 * @var callable[]
+	 * @phpstan-var array<string, callable>
+	 */
+	protected $catches = [];
+	/** @var bool */
+	protected $sleeping;
+	/** @var PromiseState[] */
+	protected $promiseQueue = [];
+	/** @var AwaitChild|null */
+	protected $lastResolveUnrejected = null;
+	/** @var string|null */
+	protected $current = null;
+
+	/** @var array */
+	protected $lastTrace = [];
+
+	protected function __construct(bool $ultimate){
+		$this->ultimate = $ultimate;
+	}
+
+	/**
+	 * Converts a `Function<AwaitGenerator>` to a VoidCallback
+	 *
+	 * @param callable       $closure
+	 * @param callable|null  $onComplete
+	 * @param array|callable $catches
+	 *
+	 * @return Await
+	 */
+	public static function f2c(callable $closure, ?callable $onComplete = null, $catches = []) : Await{
+		return self::g2c($closure(), $onComplete, $catches);
+	}
+
+	/**
+	 * Converts an AwaitGenerator to a VoidCallback
+	 *
+	 * @param Generator      $generator
+	 * @param callable|null  $onComplete
+	 * @param array|callable $catches
+	 *
+	 * @return Await
+	 */
+	public static function g2c(Generator $generator, ?callable $onComplete = null, $catches = []) : Await{
+		$await = new Await(true);
+		$await->generator = $generator;
+		$await->onComplete = $onComplete;
+		$await->catches = is_callable($catches) ? ["" => $catches] : $catches;
+		$executor = [$generator, "rewind"];
+		while($executor !== null){
+			$executor = $await->wakeup($executor);
+		}
+		return $await;
+	}
+
+	/**
+	 * Given an array of generators,
+	 * executes them simultaneously,
+	 * and returns an array with each generator mapped to the value.
+	 * Throws exception as soon as any of the generators throws an exception.
+	 *
+	 * @param Generator[] $generators
+	 * @return Generator
+	 */
+	public static function all(array $generators) : Generator{
+		if(count($generators) === 0){
+			throw new AwaitException("Cannot await all on an empty array of generators");
+		}
+
+		foreach($generators as $k => $generator){
+			$resolve = yield;
+			$reject = yield self::REJECT;
+			self::g2c($generator, function($result) use($k, $resolve) {
+				$resolve([$k, $result]);
+			}, $reject);
+		}
+		$all = yield self::ALL;
+		$return = [];
+		foreach($all as [$k, $result]) {
+			$return[$k] = $result;
+		}
+		return $return;
+	}
+
+	/**
+	 * Given an array of generators,
+	 * executes them simultaneously,
+	 * and returns a single-element array `[$k, $v]` as soon as any of the generators returns,
+	 * with `$k` being the key of that generator in the array
+	 * and `$v` being the value returned by the generator.
+	 * Throws exception as soon as any of the generators throws an exception.
+	 *
+	 * Note that the not-yet-resolved generators will keep on running,
+	 * but their return values or exceptions thrown will be ignored.
+	 *
+	 * The return value uses `[$k, $v]` instead of `[$k => $v]`.
+	 * The user may use the format `[$k, $v] = yield Await::race(...);`
+	 * to obtain `$k` and `$v` conveniently.
+	 *
+	 * @param Generator[] $generators
+	 * @return Generator
+	 */
+	public static function race(array $generators) : Generator{
+		if(count($generators) === 0){
+			throw new AwaitException("Cannot race an empty array of generators");
+		}
+
+		foreach($generators as $k => $generator){
+			$resolve = yield;
+			$reject = yield self::REJECT;
+			self::g2c($generator, function($result) use($k, $resolve) {
+				$resolve([$k, $result]);
+			}, $reject);
+		}
+		[$k, $result] = yield self::RACE;
+		return [$k, $result];
+	}
+
+	/**
+	 * A wrapper around wakeup() to convert deep recursion to tail recursion
+	 *
+	 * @param callable|null $executor
+	 */
+	public function wakeupFlat(?callable $executor) : void{
+		while($executor !== null){
+			$executor = $this->wakeup($executor);
+		}
+	}
+
+	/**
+	 * Calls $executor and returns the next function to execute
+	 *
+	 * @param callable $executor a function that triggers the execution of the generator
+	 *
+	 * @return callable|null
+	 */
+	protected function wakeup(callable $executor) : ?callable{
+		try{
+			$this->sleeping = false;
+			$executor();
+		}catch(Throwable $throwable){
+			$this->reject($throwable);
+			return null;
+		}
+
+		if(!$this->generator->valid()){
+			$ret = $this->generator->getReturn();
+			$this->resolve($ret);
+			return null;
+		}
+
+		// $key = $this->generator->key();
+		$this->current = $current = $this->generator->current() ?? self::RESOLVE;
+
+		if($current === self::RESOLVE){
+			return function() : void{
+				$promise = new AwaitChild($this);
+				$this->promiseQueue[] = $promise;
+				$this->lastResolveUnrejected = $promise;
+				$this->generator->send([$promise, "resolve"]);
+			};
+		}
+
+		if($current === self::RESOLVE_MULTI){
+			return function() : void{
+				$promise = new AwaitChild($this);
+				$this->promiseQueue[] = $promise;
+				$this->lastResolveUnrejected = $promise;
+				$this->generator->send(static function(...$args) use($promise) : void{
+					$promise->resolve($args);
+				});
+			};
+		}
+
+		if($current === self::REJECT){
+			if($this->lastResolveUnrejected === null){
+				$this->reject(new AwaitException("Cannot yield Await::REJECT without yielding Await::RESOLVE first; they must be yielded in pairs"));
+				return null;
+			}
+			return function() : void{
+				$promise = $this->lastResolveUnrejected;
+				$this->lastResolveUnrejected = null;
+				$this->generator->send([$promise, "reject"]);
+			};
+		}
+
+		$this->lastResolveUnrejected = null;
+
+		if($current === self::RACE){
+			if(count($this->promiseQueue) === 0){
+				$this->reject(new AwaitException("Yielded Await::RACE when there is nothing racing"));
+				return null;
+			}
+
+			$hasResult = 0; // 0 = all pending, 1 = one resolved, 2 = one rejected
+			foreach($this->promiseQueue as $promise){
+				if($promise->state === self::STATE_RESOLVED){
+					$hasResult = 1;
+					$result = $promise->resolved;
+					break;
+				}
+				if($promise->state === self::STATE_REJECTED){
+					$hasResult = 2;
+					$result = $promise->rejected;
+					break;
+				}
+			}
+
+			if($hasResult !== 0){
+				foreach($this->promiseQueue as $p){
+					$p->cancelled = true;
+				}
+				$this->promiseQueue = [];
+				assert(isset($result));
+				if($hasResult === 1){
+					return function() use ($result){
+						$this->generator->send($result);
+					};
+				}
+				assert($hasResult === 2);
+				return function() use ($result){
+					$this->generator->throw($result);
+				};
+			}
+
+			$this->sleeping = true;
+			return null;
+		}
+
+		if($current === self::ONCE || $current === self::ALL){
+			if($current === self::ONCE && count($this->promiseQueue) !== 1){
+				$this->reject(new AwaitException("Yielded Await::ONCE when the pending queue size is " . count($this->promiseQueue) . " != 1"));
+				return null;
+			}
+
+			$results = [];
+
+			// first check if nothing is immediately rejected
+			foreach($this->promiseQueue as $promise){
+				if($promise->state === self::STATE_REJECTED){
+					foreach($this->promiseQueue as $p){
+						$p->cancelled = true;
+					}
+					$this->promiseQueue = [];
+					$ex = $promise->rejected;
+					return function() use ($ex) : void{
+						$this->generator->throw($ex);
+					};
+				}
+			}
+
+			foreach($this->promiseQueue as $promise){
+				// if anything is pending, some others are pending and some others are resolved, but we will eventually get rejected/resolved from the pending promises
+				if($promise->state === self::STATE_PENDING){
+					$this->sleeping = true;
+					return null;
+				}
+				assert($promise->state === self::STATE_RESOLVED);
+				$results[] = $promise->resolved;
+			}
+
+			// all resolved
+			$this->promiseQueue = [];
+			return function() use ($current, $results) : void{
+				$this->generator->send($current === self::ONCE ? $results[0] : $results);
+			};
+		}
+
+		if($current instanceof Generator){
+			if(!empty($this->promiseQueue)){
+				$this->reject(new UnawaitedCallbackException("Yielding a generator"));
+				return null;
+			}
+
+			$child = new AwaitChild($this);
+			$await = Await::g2c($current, [$child, "resolve"], [$child, "reject"]);
+
+			if($await->state === self::STATE_RESOLVED){
+				$return = $await->resolved;
+				return function() use ($return) : void{
+					$this->generator->send($return);
+				};
+			}
+			if($await->state === self::STATE_REJECTED){
+				$ex = $await->rejected;
+				return function() use ($ex) : void{
+					$this->generator->throw($ex);
+				};
+			}
+
+			$this->sleeping = true;
+			$this->current = self::ONCE;
+			$this->promiseQueue = [$await];
+			return null;
+		}
+
+		$this->reject(new AwaitException("Unknown yield value"));
+		return null;
+	}
+
+	public function recheckPromiseQueue(AwaitChild $changed) : void{
+		assert($this->sleeping);
+		if($this->current === self::ONCE){
+			assert(count($this->promiseQueue) === 1);
+		}
+
+		if($this->current === self::RACE){
+			foreach($this->promiseQueue as $p){
+				$p->cancelled = true;
+			}
+			$this->promiseQueue = [];
+
+			if($changed->state === self::STATE_REJECTED){
+				$ex = $changed->rejected;
+				$this->wakeupFlat(function() use ($ex) : void{
+					$this->generator->throw($ex);
+				});
+			}else{
+				$value = $changed->resolved;
+				$this->wakeupFlat(function() use ($value) : void{
+					$this->generator->send($value);
+				});
+			}
+			return;
+		}
+
+		$current = $this->current;
+		$results = [];
+		foreach($this->promiseQueue as $promise){
+			if($promise->state === self::STATE_PENDING){
+				return;
+			}
+			if($promise->state === self::STATE_REJECTED){
+				foreach($this->promiseQueue as $p){
+					$p->cancelled = true;
+				}
+				$this->promiseQueue = [];
+				$ex = $promise->rejected;
+				$this->wakeupFlat(function() use ($ex) : void{
+					$this->generator->throw($ex);
+				});
+				return;
+			}
+			assert($promise->state === self::STATE_RESOLVED);
+			$results[] = $promise->resolved;
+		}
+		// all resolved
+		$this->promiseQueue = [];
+		$this->wakeupFlat(function() use ($current, $results){
+			$this->generator->send($current === self::ONCE ? $results[0] : $results);
+		});
+	}
+
+	public function resolve($value) : void{
+		if(!empty($this->promiseQueue)){
+			$this->reject(new UnawaitedCallbackException("Resolution of await generator"));
+			return;
+		}
+		$this->sleeping = true;
+		parent::resolve($value);
+		if($this->onComplete){
+			($this->onComplete)($this->resolved);
+		}
+	}
+
+	public function reject(Throwable $throwable) : void{
+		$this->sleeping = true;
+
+		parent::reject($throwable);
+		foreach($this->catches as $class => $onError){
+			if($class === "" || is_a($throwable, $class)){
+				$onError($throwable);
+				return;
+			}
+		}
+		throw new AwaitException("Unhandled async exception", 0, $throwable);
+	}
+
+	public function isSleeping() : bool{
+		return $this->sleeping;
+	}
+
+	public function isUltimate() : bool{
+		return $this->ultimate;
+	}
+}
+<?php
+
+/*
+ * await-generator
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\SOFe\AwaitGenerator;
+
+use Throwable;
+
+abstract class PromiseState{
+	public const STATE_PENDING = 0;
+	public const STATE_RESOLVED = 1;
+	public const STATE_REJECTED = 2;
+
+	/** @var int */
+	protected $state = self::STATE_PENDING;
+	/** @var mixed */
+	protected $resolved;
+	/** @var Throwable */
+	protected $rejected;
+
+	/** @var bool  */
+	protected $cancelled = false;
+
+	/**
+	 * @param mixed $value
+	 */
+	public function resolve($value) : void{
+		$this->state = self::STATE_RESOLVED;
+		$this->resolved = $value;
+	}
+
+	public function reject(Throwable $value) : void{
+		$this->state = self::STATE_REJECTED;
+		$this->rejected = $value;
+	}
+}
+<?php
+
+/*
+ * await-generator
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\SOFe\AwaitGenerator;
+
+use Throwable;
+
+class AwaitChild extends PromiseState{
+	/** @var Await */
+	protected $await;
+
+	public function __construct(Await $await){
+		$this->await = $await;
+	}
+
+	/**
+	 * @param mixed $value
+	 */
+	public function resolve($value = null) : void{
+		parent::resolve($value);
+		if(!$this->cancelled && $this->await->isSleeping()){
+			$this->await->recheckPromiseQueue($this);
+		}
+	}
+
+	public function reject(Throwable $value) : void{
+		parent::reject($value);
+		if(!$this->cancelled && $this->await->isSleeping()){
+			$this->await->recheckPromiseQueue($this);
+		}
+	}
+}
+<?php
+
+/*
+ * libasynql
+ *
+ * Copyright (C) 2018 SOFe
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+declare(strict_types=1);
+
+namespace shock95x\auctionhouse\libs\poggit\libasynql\result;
+
+use shock95x\auctionhouse\libs\poggit\libasynql\SqlResult;
+
+class SqlSelectResult extends SqlResult{
+	private $columnInfo;
+	private $rows;
+
+	/**
+	 * SqlSelectResult constructor.
+	 *
+	 * @param SqlColumnInfo[] $columnInfo
+	 * @param array[]         $rows
+	 */
+	public function __construct(array $columnInfo, array $rows){
+		$this->columnInfo = $columnInfo;
+		$this->rows = $rows;
+	}
+
+	/**
+	 * Returns the columns from the query
+	 *
+	 * @return SqlColumnInfo[]
+	 */
+	public function getColumnInfo() : array{
+		return $this->columnInfo;
+	}
+
+	/**
+	 * Returns an array of rows. Each row is an array with keys as the (virtual) column name and values as the cell value. The type of cell values are juggled with the following special rules:
+	 * - <code>TINYINT(1)</code> and <code>BIT(1)</code> in MySQL are expressed in <code>bool</code>
+	 * - Signed <code>long long</code>, a.k.a. <code>BIGINT [SIGNED]</code>, i.e. 64-bit unsigned integers, are expressed in <code>int</code>, because PocketMine only supports 64-bit machines.
+	 * - Unsigned <code>long long</code>, a.k.a. <code>BIGINT [SIGNED]</code>, i.e. 64-bit unsigned integers, are also expressed in <code>int</code>. If it exceeds <code>PHP_INT_MAX</code>, it overflows natively, i.e. <b>PHP_INT_MAX + 1 becomes PHP_INT_MIN</b>, which is different from both mysqli's implementation and PHP's behaviour.
+	 * - Timestamps will be converted to a {@link https://php.net/date date()}-compatible UNIX timestamp in seconds.
+	 * - Other types are juggled according to rules provided by the backend.
+	 *
+	 * If the query has multiple columns with the same name, the latter one overwrites the former ones. For example, the query <code>SELECT 1 a, 2 a</code> returns the result set <code>[ ["a" => 2] ]</code>.
+	 *
+	 * Also note that qualifying the column reference with the table name will not add the table name into the column name in the result set. For example, the query <code>SELECT foo.qux, bar.qux</code> will return the result set <code>[ ["qux" => "the value in bar.qux"] ]</code>.
+	 *
+	 * Therefore, use column aliases when the column names may duplicate.
+	 *
+	 * @return array[]
+	 */
+	public function getRows() : array{
+		return $this->rows;
+	}
+}
+<?php
+namespace shock95x\auctionhouse\task;
+
+use shock95x\auctionhouse\database\Database;
+use pocketmine\scheduler\Task;
+
+class ListingExpireTask extends Task {
+
+	private $database;
+
+	/**
+	 * ListingExpireTask constructor.
+	 *
+	 * @param Database $database
+	 */
+	public function __construct(Database $database) {
+		$this->database = $database;
+	}
+
+	/**
+	 * Actions to execute when run
+	 *
+	 * @param int $currentTick
+	 *
+	 * @return void
+	 */
+	public function onRun(int $currentTick) {
+		$this->database->save();
+	}
+}
+<?php
+namespace shock95x\auctionhouse;
+
+use shock95x\auctionhouse\menu\MenuHandler;
+use shock95x\auctionhouse\utils\Pagination;
+use shock95x\auctionhouse\libs\muqsit\invmenu\inventory\InvMenuInventory;
+use pocketmine\event\Listener;
+use pocketmine\event\inventory\InventoryCloseEvent;
+
+
+class EventListener implements Listener{
+
+	/** @var AuctionHouse */
+	protected $loader;
+
+	/**
+	 * EventListener constructor.
+	 *
+	 * @param AuctionHouse $loader
+	 */
+	public function __construct(AuctionHouse $loader) {
+		$this->loader = $loader;
+	}
+
+	public function onInventoryClose(InventoryCloseEvent $event) {
+		if($event->getInventory() instanceof InvMenuInventory) {
+			Pagination::setPage($event->getPlayer(), 1);
+			MenuHandler::setViewingMenu($event->getPlayer(), -1);
+		}
+	}
+}<?php
+namespace shock95x\auctionhouse\economy;
+
+use onebone\economyapi\EconomyAPI;
+use ReflectionException;
+
+class EconomySProvider implements EconomyProvider {
+
+        /** @var EconomyAPI */
+        protected $economyAPI;
+
+        /**
+         * EconomySProvider constructor.
+         */
+        public function __construct(){
+                $this->economyAPI = EconomyAPI::getInstance();
+        }
+
+		/**
+		 * @param $player
+		 * @param int $amount
+		 *
+		 * @throws ReflectionException
+		 */
+        public function addMoney($player, int $amount): void{
+                $this->economyAPI->addMoney($player, $amount);
+        }
+
+		/**
+		 * @param $player
+		 * @param int $amount
+		 *
+		 * @throws ReflectionException
+		 */
+        public function subtractMoney($player, int $amount): void{
+                $this->economyAPI->reduceMoney($player, $amount);
+        }
+
+        /**
+         * @param $player
+         *
+         * @return int
+         */
+        public function getMoney($player): int{
+        	return $this->economyAPI->myMoney($player);
+        }
+
+        /**
+         * @return string
+         */
+        public function getMonetaryUnit(): string {
+        	return $this->economyAPI->getMonetaryUnit();
+        }
+}<?php
+
+namespace shock95x\auctionhouse\economy;
+
+interface EconomyProvider {
+
+        /**
+         * @param $player
+         * @param int    $amount
+         */
+        public function addMoney($player, int $amount): void;
+
+        /**
+         * @param $player
+         * @param int    $amount
+         */
+        public function subtractMoney($player, int $amount): void;
+
+        /**
+         * @param $player
+         *
+         * @return int
+         */
+        public function getMoney($player): int;
+
+		/**
+		 * Returns the monetary unit
+		 *
+		 * @return string
+	    */
+        public function getMonetaryUnit() : string;
+}
+<?php
+namespace shock95x\auctionhouse\commands;
+
+use Exception;
+use shock95x\auctionhouse\database\DataHolder;
+use shock95x\auctionhouse\economy\EconomyProvider;
+use shock95x\auctionhouse\utils\Settings;
+use shock95x\auctionhouse\utils\Utils;
+use pocketmine\command\Command;
+use pocketmine\command\CommandSender;
+use pocketmine\command\PluginIdentifiableCommand;
+use pocketmine\item\Item;
+use pocketmine\nbt\BigEndianNBTStream;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+use shock95x\auctionhouse\AuctionHouse;
+use pocketmine\utils\TextFormat;
+
+class AHCommand extends Command implements PluginIdentifiableCommand {
+
+	/** @var AuctionHouse */
+	protected $plugin;
+
+	/**
+	 * EventListener constructor.
+	 *
+	 * @param AuctionHouse $plugin
+	 */
+	public function __construct(AuctionHouse $plugin) {
+		parent::__construct("ah", "Opens AuctionHouse", Utils::prefixMessage(TextFormat::RED . "Usage: /ah [shop | sell | listings | update | about]"), []);
+		$this->plugin = $plugin;
+		$this->setAliases(["auctionhouse"]);
+		$this->setPermissionMessage(Utils::prefixMessage(TextFormat::RED . "You do not have permission to use this command!"));
+	}
+
+	/**
+	 * @param CommandSender $sender
+	 * @param string $commandLabel
+	 * @param string[] $args
+	 *
+	 * @return bool
+	 * @throws Exception
+	 */
+	public function execute(CommandSender $sender, string $commandLabel, array $args): bool {
+		if (!$sender instanceof Player) {
+			$sender->sendMessage("You must execute this command in-game.");
+			return false;
+		}
+		assert($sender instanceof Player);
+		if (count($args) == 0 || $args[0] == "shop") {
+			$this->plugin->sendAHMenu($sender);
+			return true;
+		}
+		switch ($args[0]) {
+			case "update":
+				if(!$sender->hasPermission("auctionhouse.command.update")) {
+					$sender->sendMessage($this->getPermissionMessage());
+					return false;
+				}
+				$config = $this->getPlugin()->getConfig();
+				$config->reload();
+				Settings::init($config);
+				$this->getPlugin()->loadLanguages();
+				$this->getPlugin()->getDatabase()->save();
+				$sender->sendMessage(Utils::prefixMessage(TextFormat::GREEN . "Update completed"));
+				return true;
+			case "listings":
+				$this->plugin->sendListings($sender);
+				return true;
+			case "sell":
+				$item = $sender->getInventory()->getItemInHand();
+				if($item == null || $item->getId() == Item::AIR) {
+					$sender->sendMessage($this->plugin->getMessage($sender, "no-item"));
+					return false;
+				}
+				if($sender->isCreative() && !Settings::getCreativeSale()) {
+					$sender->sendMessage($this->plugin->getMessage($sender, "in-creative"));
+					return false;
+				}
+				foreach (Settings::getBlacklist() as $blacklistedItem) {
+					if($item->getId() == $blacklistedItem->getId() && $item->getDamage() == $blacklistedItem->getDamage()) {
+						$sender->sendMessage($this->plugin->getMessage($sender, "item-blacklisted"));
+						return false;
+					}
+				}
+				if(!isset($args[1]) || !is_numeric($args[1])) {
+					$this->plugin->getMessage($sender, "invalid-price");
+					return false;
+				}
+				if(count(DataHolder::getListingsByPlayer($sender)) >= (Settings::getMaxItems())) {
+					$this->plugin->getMessage($sender, "max-listings");
+					return false;
+				}
+				$listingPrice = Settings::getListingPrice();
+				if(($this->getEconomy()->getMoney($sender) < $listingPrice) && $listingPrice != 0) {
+					$this->plugin->getMessage($sender, "invalid-balance");
+					return false;
+				}
+				if($args[1] < Settings::getMinPrice() || ($args[1] > Settings::getMaxPrice() && Settings::getMaxPrice() != -1)) {
+					$sender->sendMessage(str_replace(["@min", "@max"], [Settings::getMinPrice(), Settings::getMaxPrice()], $this->plugin->getMessage($sender, "price-range", true)));
+					return false;
+				}
+				if($listingPrice != 0) $this->getEconomy()->subtractMoney($sender, $listingPrice);
+				$sender->getInventory()->removeItem($item);
+				DataHolder::addListing($sender, (int) $args[1], (new BigEndianNBTStream())->writeCompressed($item->nbtSerialize()));
+				$sender->sendMessage(str_replace(["@player", "@item", "@price", "@amount"], [$sender->getName(), $item->getName(), $this->getEconomy()->getMonetaryUnit() . $args[1], $item->getCount()], $this->getPlugin()->getMessage($sender, "item-listed", true)));
+				return true;
+			case "about":
+				$author = $this->plugin->getDescription()->getAuthors()[0];
+				$sender->sendMessage(Utils::prefixMessage(TextFormat::BLUE . "This server is running AuctionHouse v" . $this->plugin->getDescription()->getVersion() . " by " . $author));
+				return true;
+		}
+		$sender->sendMessage($this->getUsage());
+		return true;
+	}
+
+	/**
+	 * @return AuctionHouse
+	 */
+	public function getPlugin() : Plugin{
+		return $this->plugin;
+	}
+
+	public function getEconomy() : EconomyProvider {
+		return $this->getPlugin()->economyProvider;
+	}
+}
+<?php
+namespace shock95x\auctionhouse\utils;
+
+use pocketmine\item\Item;
+
+class Utils {
+
+	public static function getEndTime() : int {
+		return time() + (Settings::getExpireInterval() * 3600);
+}
+
+	public static function colorMessage(string $string) {
+		return str_replace("&", "\xc2\xa7", $string);
+	}
+
+	public static function prefixMessage($string) {
+		return str_replace("&", "\xc2\xa7", Settings::getPrefix() . " " . $string);
+	}
+
+	public static function isBlacklisted(Item $item) {
+		//todo
+	}
+}<?php
+namespace shock95x\auctionhouse\menu;
+
+use shock95x\auctionhouse\AuctionHouse;
+use shock95x\auctionhouse\database\Database;
+use shock95x\auctionhouse\database\DataHolder;
+use shock95x\auctionhouse\economy\EconomyProvider;
+use shock95x\auctionhouse\event\AuctionEndEvent;
+use shock95x\auctionhouse\task\MenuDelayTask;
+use shock95x\auctionhouse\utils\Pagination;
+use shock95x\auctionhouse\libs\muqsit\invmenu\InvMenu;
+use pocketmine\inventory\transaction\action\SlotChangeAction;
+use pocketmine\item\Item;
+use pocketmine\nbt\tag\ByteTag;
+use pocketmine\nbt\tag\CompoundTag;
+use pocketmine\nbt\tag\LongTag;
+use pocketmine\Player;
+use pocketmine\utils\TextFormat;
+
+class MenuHandler {
+
+	private $plugin;
+
+	const AUCTION_MENU = 0;
+	const LISTINGS_MENU = 1;
+	const EXPIRED_MENU = 2;
+
+	/** @var array */
+	private static $menuOpen;
+
+	public function __construct(AuctionHouse $plugin) {
+		$this->plugin = $plugin;
+		self::$menuOpen = [];
+	}
+
+	public static function setViewingMenu(Player $player, int $menu) {
+		self::$menuOpen[$player->getRawUniqueId()] = $menu;
+	}
+
+	public static function getViewingMenu(Player $player) {
+		if(isset(self::$menuOpen[$player->getRawUniqueId()])) {
+			return self::$menuOpen[$player->getRawUniqueId()];
+		}
+		return -1;
+	}
+
+	public function handleMainPage(Player $player, Item $item) {
+		if($item->getNamedTag()->hasTag("return")) {
+			$this->getPlugin()->sendAHMenu($player);
+		}
+	}
+
+	public function handleListings(Player $player, Item $itemClicked, Item $itemClickedWith, SlotChangeAction $action) {
+		$inventory = $action->getInventory();
+		if($action->getSlot() <= 44 && $itemClicked->getNamedTag()->hasTag("marketId") && $itemClicked->getId() !== Item::AIR) {
+			$auction = DataHolder::getListingById($itemClicked->getNamedTag()->getLong("marketId"));
+			if($auction == null) {
+				return;
+			}
+			$auction->setExpired();
+			(new AuctionEndEvent($auction, AuctionEndEvent::CANCELLED, $player))->call();
+			$inventory->removeItem($itemClicked);
+		}
+		$this->handleMainPage($player, $itemClicked);
+		if($itemClicked->getNamedTag()->hasTag("pagination")) {
+			$page = $itemClicked->getNamedTag()->getByte("pagination");
+			$this->handlePagination($player, $page);
+			return;
+		}
+	}
+
+	public function handleExpired(Player $player, Item $itemClicked, Item $itemClickedWith, SlotChangeAction $action) {
+		$inventory = $action->getInventory();
+		if($action->getSlot() <= 44 && $itemClicked->getNamedTag()->hasTag("marketId") && $itemClicked->getId() !== Item::AIR) {
+			$marketId = $itemClicked->getNamedTag()->getLong("marketId");
+			$auction = DataHolder::getListingById($marketId);
+			if($auction == null || $auction->getSeller(true) != $player->getRawUniqueId()) {
+				return;
+			}
+			$item = $auction->getItem();
+			if($player->getInventory()->canAddItem($item) && $auction->getSeller(true) == $player->getRawUniqueId()) {
+				DataHolder::removeAuction($auction);
+				$inventory->setItem($action->getSlot(), Item::get(Item::AIR));
+				$player->getInventory()->addItem($item);
+				$player->sendMessage(str_replace(["@item", "@amount"], [$item->getName(), $item->getCount()], $this->plugin->getMessage($player, "returned-item", true)));
+			}
+		}
+		$this->handleMainPage($player, $itemClicked);
+		if($itemClicked->getNamedTag()->hasTag("pagination")) {
+			$page = $itemClicked->getNamedTag()->getByte("pagination");
+			$this->handlePagination($player, $page);
+			return;
+		}
+	}
+
+	public function handleItemSelection(Player $player, Item $itemClicked, Item $itemClickedWith, SlotChangeAction $action) : bool {
+		$inventory = $action->getInventory();
+		if($itemClicked->getNamedTag()->hasTag("refresh")) {
+			$this->getPlugin()->sendAHMenu($player, 2);
+			return false;
+		}
+		if($itemClicked->getNamedTag()->hasTag("listings")) {
+			$this->getPlugin()->sendListings($player);
+			return false;
+		}
+		if($itemClicked->getNamedTag()->hasTag("expired")) {
+			$this->getPlugin()->sendExpired($player);
+			return false;
+		}
+		if($itemClicked->getNamedTag()->hasTag("pagination")) {
+			$page = $itemClicked->getNamedTag()->getByte("pagination");
+			$this->handlePagination($player, $page);
+			return true;
+		}
+		if($action->getSlot() <= 44 && $itemClicked->getNamedTag()->hasTag("marketId")) {
+			$player->removeWindow($inventory);
+			$id = $itemClicked->getNamedTag()->getLong("marketId");
+
+			$menu = InvMenu::create(InvMenu::TYPE_CHEST)
+				->readonly()
+				->setName($this->getPlugin()->getMessage($player, "purchase-menu-name", true, false))
+				->setListener([$this, "handlePurchase"]);
+
+			$newInv = $menu->getInventoryForPlayer($player);
+
+			$item = clone $itemClicked;
+			$newInv->setItem(13, $item);
+
+			$confirm = $this->getPlugin()->getMessage($player, "purchase-confirm", true, false);
+			$cancel = $this->getPlugin()->getMessage($player, "purchase-cancel", true, false);
+			for($x = 9; $x <= 12; $x++) {
+				$cancelItem = Item::get(Item::STAINED_GLASS_PANE, 14)->setCompoundTag(new CompoundTag("", [new ByteTag("cancelled", 1)]))->setCustomName(TextFormat::RESET . $cancel["name"]);
+				$newInv->setItem($x, $cancelItem);
+			}
+			for($x = 14; $x <= 17; $x++) {
+				$confirmItem = Item::get(Item::STAINED_GLASS_PANE, 5)->setCompoundTag(new CompoundTag("", [new LongTag("marketId", $id)]))->setCustomName(TextFormat::RESET . $confirm["name"]);
+				$newInv->setItem($x, $confirmItem);
+			}
+			$this->getPlugin()->getScheduler()->scheduleDelayedTask(new MenuDelayTask($player, $menu), 10);
+			return true;
+		}
+		return true;
+	}
+
+	public function handlePagination(Player $player, int $pagination) { // todo: handle this better
+		switch(self::$menuOpen[$player->getRawUniqueId()]) {
+			case self::AUCTION_MENU:
+				switch($pagination) {
+					case Pagination::BACK:
+						$this->plugin->sendAHMenu($player, Pagination::getPage($player) - 1);
+						break;
+					case Pagination::NEXT:
+						$this->plugin->sendAHMenu($player, Pagination::getPage($player) + 1);
+						break;
+					case Pagination::REFRESH:
+						$this->plugin->sendAHMenu($player, Pagination::getPage($player));
+						break;
+				}
+				break;
+			case self::LISTINGS_MENU:
+				switch($pagination) {
+					case Pagination::BACK:
+						$this->plugin->sendListings($player, Pagination::getPage($player) - 1);
+						break;
+					case Pagination::NEXT:
+						$this->plugin->sendListings($player, Pagination::getPage($player) + 1);
+						break;
+					case Pagination::REFRESH:
+						$this->plugin->sendListings($player, Pagination::getPage($player));
+						break;
+				}
+				break;
+			case self::EXPIRED_MENU:
+				switch($pagination) {
+					case Pagination::BACK:
+						$this->plugin->sendExpired($player, Pagination::getPage($player) - 1);
+						break;
+					case Pagination::NEXT:
+						$this->plugin->sendExpired($player, Pagination::getPage($player) + 1);
+						break;
+					case Pagination::REFRESH:
+						$this->plugin->sendExpired($player, Pagination::getPage($player));
+						break;
+				}
+				break;
+		}
+	}
+
+	public function handlePurchase(Player $player, Item $itemClicked, Item $itemClickedWith, SlotChangeAction $action) : bool {
+		$username = $player->getName();
+		$inventory = $action->getInventory();
+		if ($itemClicked->getNamedTag()->hasTag("cancelled")) {
+			$player->removeWindow($inventory);
+			$this->getPlugin()->getMessage($player, "cancelled-purchase");
+			return false;
+		}
+		if (!$itemClicked->getNamedTag()->hasTag("marketId")) {
+			return false;
+		}
+		$marketId = $itemClicked->getNamedTag()->getLong("marketId");
+		$auction = DataHolder::getListingById($marketId);
+		if($auction == null) {
+			$this->plugin->getMessage($player, "listing-gone");
+			return false;
+		}
+		$item = $auction->getItem();
+
+		if($auction->getSeller(true) == $player->getRawUniqueId()) {
+			$player->removeWindow($inventory);
+			$this->plugin->getMessage($player, "self-purchase");
+			return false;
+		}
+		if ($this->getPlugin()->economyProvider->getMoney($player) < $auction->getPrice()) {
+			$player->removeWindow($inventory);
+			$this->plugin->getMessage($player, "cannot-afford");
+			return false;
+		}
+		if (!$player->getInventory()->canAddItem($item)) {
+			$player->removeWindow($inventory);
+			$this->plugin->getMessage($player, "not-enough-space");
+			return false;
+		}
+		DataHolder::removeAuction($auction);
+		$this->getPlugin()->economyProvider->addMoney($auction->getSeller(), $auction->getPrice());
+		$this->getPlugin()->economyProvider->subtractMoney($player, $auction->getPrice());
+		$player->getInventory()->addItem($item);
+		$player->removeWindow($inventory);
+		$pl = $this->getPlugin()->getServer()->getPlayerByRawUUID($auction->getSeller(true));
+		$player->sendMessage(str_replace(["@player", "@item", "@price", "@amount"], [$username, $item->getName(), $auction->getPrice(true), $item->getCount()], $this->plugin->getMessage($player, "purchased-item", true)));
+
+		if($pl != null) {
+			$pl->sendMessage(str_replace(["@player", "@item", "@price", "@amount"], [$username, $item->getName(), $auction->getPrice(true), $item->getCount()], $this->plugin->getMessage($player, "seller-message", true)));
+		}
+		(new AuctionEndEvent($auction, AuctionEndEvent::PURCHASED, $player))->call();
+		return true;
+	}
+	
+	public function getPlugin() : AuctionHouse {
+		return $this->plugin;
+	}
+
+	public function getEconomy() : EconomyProvider {
+		return $this->plugin->economyProvider;
+	}
+	
+	public function getDatabase () : Database {
+		return $this->plugin->getDatabase();
+	}
+}

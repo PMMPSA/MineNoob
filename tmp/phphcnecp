@@ -1,0 +1,1243 @@
+name: ScoreHud
+main: JackMD\ScoreHud\Main
+api: [3.0.0]
+version: 3.0.0
+author: JackMD
+description: Add fully customizable scoreboards to your server.
+
+permissions:
+  sh.command.sh:
+    default: true
+    description: Allow players to use /scorehud command.<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud;
+
+use JackMD\ScoreHud\libs\JackMD\ScoreFactory\ScoreFactory;
+use JackMD\ScoreHud\commands\ScoreHudCommand;
+use JackMD\ScoreHud\data\DataManager;
+use JackMD\ScoreHud\task\ScoreUpdateTask;
+use JackMD\ScoreHud\libs\JackMD\UpdateNotifier\UpdateNotifier;
+use pocketmine\Player;
+use pocketmine\plugin\PluginBase;
+use pocketmine\utils\Config;
+
+class Main extends PluginBase{
+
+	/** @var string */
+	public const PREFIX = "§8[§6S§eH§8]§r ";
+	/** @var string */
+	private const CONFIG_VERSION = 7;
+	/** @var string */
+	private const DATA_CONFIG_VERSION = 3;
+
+	/** @var array */
+	public $disabledScoreHudPlayers = [];
+	/** @var DataManager */
+	private $dataManager;
+	/** @var null|array */
+	private $scoreboards = [];
+	/** @var null|array */
+	private $scorelines = [];
+
+	public function onLoad(){
+		$this->checkVirions();
+		$this->initScoreboards();
+
+		UpdateNotifier::checkUpdate($this, $this->getDescription()->getName(), $this->getDescription()->getVersion());
+	}
+
+	/**
+	 * Checks if the required virions/libraries are present before enabling the plugin.
+	 */
+	private function checkVirions(): void{
+		if(!class_exists(ScoreFactory::class) || !class_exists(UpdateNotifier::class)){
+			throw new \RuntimeException("ScoreHud plugin will only work if you use the plugin phar from Poggit.");
+		}
+	}
+
+	private function initScoreboards(): void{
+		$this->saveDefaultConfig();
+		$this->saveResource("data.yml");
+		$this->checkConfigs();
+
+		$dataConfig = new Config($this->getDataFolder() . "data.yml", Config::YAML);
+		foreach($dataConfig->getNested("scoreboards") as $world => $data){
+			$world = strtolower($world);
+			$this->scoreboards[$world] = $data;
+			$this->scorelines[$world] = $data["lines"];
+		}
+	}
+
+	/**
+	 * Check if the configs is up-to-date.
+	 */
+	public function checkConfigs(): void{
+		if((!$this->getConfig()->exists("config-version")) || ($this->getConfig()->get("config-version") !== self::CONFIG_VERSION)){
+			rename($this->getDataFolder() . "config.yml", $this->getDataFolder() . "config_old.yml");
+			$this->saveResource("config.yml");
+			$this->getLogger()->critical("Your configuration file is outdated.");
+			$this->getLogger()->notice("Your old configuration has been saved as config_old.yml and a new configuration file has been generated. Please update accordingly.");
+		}
+
+		$dataConfig = new Config($this->getDataFolder() . "data.yml", Config::YAML);
+		if((!$dataConfig->exists("data-version")) || ($dataConfig->get("data-version") !== self::DATA_CONFIG_VERSION)){
+			rename($this->getDataFolder() . "data.yml", $this->getDataFolder() . "data_old.yml");
+			$this->saveResource("data.yml");
+			$this->getLogger()->critical("Your data.yml file is outdated.");
+			$this->getLogger()->notice("Your old data.yml has been saved as data_old.yml and a new data.yml file has been generated. Please update accordingly.");
+		}
+	}
+
+	public function onEnable(): void{
+		$this->dataManager = new DataManager($this);
+		$this->getServer()->getCommandMap()->register("scorehud", new ScoreHudCommand($this));
+		$this->setTimezone($this->getConfig()->get("timezone"));
+		$this->getServer()->getPluginManager()->registerEvents(new EventListener($this), $this);
+		$this->getScheduler()->scheduleRepeatingTask(new ScoreUpdateTask($this), (int) $this->getConfig()->get("update-interval") * 20);
+		$this->getLogger()->info("ScoreHud Plugin Enabled.");
+	}
+
+	/**
+	 * @param $timezone
+	 * @return mixed
+	 */
+	private function setTimezone($timezone){
+		if($timezone !== false){
+			$this->getLogger()->notice("Server timezone successfully set to " . $timezone);
+
+			return @date_default_timezone_set($timezone);
+		}
+
+		return false;
+	}
+
+	/**
+	 * @param Player $player
+	 * @param string $title
+	 */
+	public function addScore(Player $player, string $title): void{
+		if(!$player->isOnline()){
+			return;
+		}
+		if(isset($this->disabledScoreHudPlayers[strtolower($player->getName())])){
+			return;
+		}
+		ScoreFactory::setScore($player, $title);
+		$this->updateScore($player);
+	}
+
+	/**
+	 * @param Player $player
+	 */
+	public function updateScore(Player $player): void{
+		if($this->getConfig()->get("per-world-scoreboards")){
+			if(!$player->isOnline()){
+				return;
+			}
+			$levelName = strtolower($player->getLevel()->getFolderName());
+			if(!is_null($lines = $this->getScorelines($levelName))){
+				if(empty($lines)){
+					$this->getLogger()->error("Please set lines key for $levelName correctly for scoreboards in data.yml.");
+					$this->getServer()->getPluginManager()->disablePlugin($this);
+
+					return;
+				}
+				$i = 0;
+				foreach($lines as $line){
+					$i++;
+					if($i <= 15){
+						ScoreFactory::setScoreLine($player, $i, $this->process($player, $line));
+					}
+				}
+			}elseif($this->getConfig()->get("use-default-score-lines")){
+				$this->displayDefaultScoreboard($player);
+			}else{
+				ScoreFactory::removeScore($player);
+			}
+		}else{
+			$this->displayDefaultScoreboard($player);
+		}
+	}
+
+	public function displayDefaultScoreboard(Player $player): void{
+		$dataConfig = new Config($this->getDataFolder() . "data.yml", Config::YAML);
+
+		$lines = $dataConfig->get("score-lines");
+		if(empty($lines)){
+			$this->getLogger()->error("Please set score-lines in data.yml properly.");
+			$this->getServer()->getPluginManager()->disablePlugin($this);
+
+			return;
+		}
+		$i = 0;
+		foreach($lines as $line){
+			$i++;
+			if($i <= 15){
+				ScoreFactory::setScoreLine($player, $i, $this->process($player, $line));
+			}
+		}
+	}
+
+	public function getScorelines(string $world): ?array{
+		return !isset($this->scorelines[$world]) ? null : $this->scorelines[$world];
+	}
+
+	/**
+	 * @param Player $player
+	 * @param string $string
+	 * @return string
+	 */
+	public function process(Player $player, string $string): string{
+		$string = str_replace("{name}", $player->getName(), $string);
+		$string = str_replace("{money}", $this->dataManager->getPlayerMoney($player), $string);
+		$string = str_replace("{online}", count($this->getServer()->getOnlinePlayers()), $string);
+		$string = str_replace("{max_online}", $this->getServer()->getMaxPlayers(), $string);
+		$string = str_replace("{rank}", $this->dataManager->getPlayerRank($player), $string);
+		$string = str_replace("{prison_rank}", $this->dataManager->getRankUpRank($player), $string);
+		$string = str_replace("{prison_next_rank_price}", $this->dataManager->getRankUpRankPrice($player), $string);
+		$string = str_replace("{item_name}", $player->getInventory()->getItemInHand()->getName(), $string);
+		$string = str_replace("{item_id}", $player->getInventory()->getItemInHand()->getId(), $string);
+		$string = str_replace("{item_meta}", $player->getInventory()->getItemInHand()->getDamage(), $string);
+		$string = str_replace("{item_count}", $player->getInventory()->getItemInHand()->getCount(), $string);
+		$string = str_replace("{x}", intval($player->getX()), $string);
+		$string = str_replace("{y}", intval($player->getY()), $string);
+		$string = str_replace("{z}", intval($player->getZ()), $string);
+		$string = str_replace("{faction}", $this->dataManager->getPlayerFaction($player), $string);
+		$string = str_replace("{faction_power}", $this->dataManager->getFactionPower($player), $string);
+		$string = str_replace("{load}", $this->getServer()->getTickUsage(), $string);
+		$string = str_replace("{tps}", $this->getServer()->getTicksPerSecond(), $string);
+		$string = str_replace("{level_name}", $player->getLevel()->getName(), $string);
+		$string = str_replace("{level_folder_name}", $player->getLevel()->getFolderName(), $string);
+		$string = str_replace("{ip}", $player->getAddress(), $string);
+		$string = str_replace("{ping}", $player->getPing(), $string);
+		$string = str_replace("{kills}", $this->dataManager->getPlayerKills($player), $string);
+		$string = str_replace("{deaths}", $this->dataManager->getPlayerDeaths($player), $string);
+		$string = str_replace("{kdr}", $this->dataManager->getPlayerKillToDeathRatio($player), $string);
+		$string = str_replace("{prefix}", $this->dataManager->getPrefix($player), $string);
+		$string = str_replace("{suffix}", $this->dataManager->getSuffix($player), $string);
+		$string = str_replace("{time}", date($this->getConfig()->get("time-format")), $string);
+		$string = str_replace("{date}", date($this->getConfig()->get("date-format")), $string);
+		$string = str_replace("{cps}", $this->dataManager->getClicks($player), $string);
+		$string = str_replace("{is_state}", $this->dataManager->getIsleState($player), $string);
+		$string = str_replace("{is_blocks}", $this->dataManager->getIsleBlocks($player), $string);
+		$string = str_replace("{is_members}", $this->dataManager->getIsleMembers($player), $string);
+		$string = str_replace("{is_size}", $this->dataManager->getIsleSize($player), $string);
+		$string = str_replace("{is_rank}", $this->dataManager->getIsleRank($player), $string);
+
+		return $string;
+	}
+
+	public function getScoreboards(): ?array{
+		return $this->scoreboards;
+	}
+
+	public function getScoreboardData(string $world): ?array{
+		return !isset($this->scoreboards[$world]) ? null : $this->scoreboards[$world];
+	}
+
+	public function getScoreWorlds(): ?array{
+		return is_null($this->scoreboards) ? null : array_keys($this->scoreboards);
+	}
+}<?php
+declare(strict_types = 1);
+
+namespace JackMD\ScoreHud\libs\JackMD\ScoreFactory;
+
+use pocketmine\network\mcpe\protocol\RemoveObjectivePacket;
+use pocketmine\network\mcpe\protocol\SetDisplayObjectivePacket;
+use pocketmine\network\mcpe\protocol\SetScorePacket;
+use pocketmine\network\mcpe\protocol\types\ScorePacketEntry;
+use pocketmine\Player;
+use pocketmine\Server;
+
+class ScoreFactory{
+	
+	/** @var string */
+	private const objectiveName = "objective";
+	/** @var string */
+	private const criteriaName = "dummy";
+	/** @var int */
+	private const MIN_LINES = 1;
+	/** @var int */
+	private const MAX_LINES = 15;
+	/** @var int */
+	public const SORT_ASCENDING = 0;
+	/** @var int */
+	public const SORT_DESCENDING = 1;
+	/** @var string */
+	public const SLOT_LIST = "list";
+	/** @var string */
+	public const SLOT_SIDEBAR = "sidebar";
+	/** @var string */
+	public const SLOT_BELOW_NAME = "belowname";
+	/** @var array */
+	private static $scoreboards = [];
+	
+	/**
+	 * Adds a Scoreboard to the player if he doesn't have one.
+	 * Can also be used to update a scoreboard.
+	 *
+	 * @param Player $player
+	 * @param string $displayName
+	 * @param int    $slotOrder
+	 * @param string $displaySlot
+	 */
+	public static function setScore(Player $player, string $displayName, int $slotOrder = self::SORT_ASCENDING, string $displaySlot = self::SLOT_SIDEBAR): void{
+		if(isset(self::$scoreboards[$player->getName()])){
+			self::removeScore($player);
+		}
+		
+		$pk = new SetDisplayObjectivePacket();
+		$pk->displaySlot = $displaySlot;
+		$pk->objectiveName = self::objectiveName;
+		$pk->displayName = $displayName;
+		$pk->criteriaName = self::criteriaName;
+		$pk->sortOrder = $slotOrder;
+		$player->sendDataPacket($pk);
+		
+		self::$scoreboards[$player->getName()] = self::objectiveName;
+	}
+	
+	/**
+	 * Removes a scoreboard from the player specified.
+	 *
+	 * @param Player $player
+	 */
+	public static function removeScore(Player $player): void{
+		$objectiveName = self::objectiveName;
+		
+		$pk = new RemoveObjectivePacket();
+		$pk->objectiveName = $objectiveName;
+		$player->sendDataPacket($pk);
+		
+		if(isset(self::$scoreboards[($player->getName())])){
+			unset(self::$scoreboards[$player->getName()]);
+		}
+	}
+	
+	/**
+	 * Returns an array consisting of a list of the players using scoreboard.
+	 *
+	 * @return array
+	 */
+	public static function getScoreboards(): array{
+		return self::$scoreboards;
+	}
+	
+	/**
+	 * Returns true or false if a player has a scoreboard or not.
+	 *
+	 * @param Player $player
+	 * @return bool
+	 */
+	public static function hasScore(Player $player): bool{
+		return (isset(self::$scoreboards[$player->getName()])) ? true : false;
+	}
+	
+	/**
+	 * Set a message at the line specified to the players scoreboard.
+	 *
+	 * @param Player $player
+	 * @param int    $line
+	 * @param string $message
+	 */
+	public static function setScoreLine(Player $player, int $line, string $message): void{
+		if(!isset(self::$scoreboards[$player->getName()])){
+			Server::getInstance()->getLogger()->error("Cannot set a score to a player with no scoreboard");
+			return;
+		}
+		if($line < self::MIN_LINES || $line > self::MAX_LINES){
+			Server::getInstance()->getLogger()->error("Score must be between the value of " . self::MIN_LINES .  " to " . self::MAX_LINES . ".");
+			Server::getInstance()->getLogger()->error($line . " is out of range");
+			return;
+		}
+		
+		$entry = new ScorePacketEntry();
+		$entry->objectiveName = self::objectiveName;
+		$entry->type = $entry::TYPE_FAKE_PLAYER;
+		$entry->customName = $message;
+		$entry->score = $line;
+		$entry->scoreboardId = $line;
+		
+		$pk = new SetScorePacket();
+		$pk->type = $pk::TYPE_CHANGE;
+		$pk->entries[] = $entry;
+		$player->sendDataPacket($pk);
+	}
+}<?php
+declare(strict_types = 1);
+
+/*
+ *  _   _           _       _       _   _       _   _  __ _
+ * | | | |         | |     | |     | \ | |     | | (_)/ _(_)
+ * | | | |_ __   __| | __ _| |_ ___|  \| | ___ | |_ _| |_ _  ___ _ __
+ * | | | | '_ \ / _` |/ _` | __/ _ \ . ` |/ _ \| __| |  _| |/ _ \ '__|
+ * | |_| | |_) | (_| | (_| | ||  __/ |\  | (_) | |_| | | | |  __/ |
+ *  \___/| .__/ \__,_|\__,_|\__\___\_| \_/\___/ \__|_|_| |_|\___|_|
+ *       | |
+ *       |_|
+ *
+ * UpdateNotifier, a updater virion for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ *
+ * UpdateNotifier is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\libs\JackMD\UpdateNotifier;
+
+use JackMD\ScoreHud\libs\JackMD\UpdateNotifier\task\UpdateNotifyTask;
+use pocketmine\plugin\Plugin;
+
+class UpdateNotifier{
+	
+	/**
+	 * Submits an async task which then checks if a new version for the plugin is available.
+	 * If an update is available then it would print a message on the console.
+	 *
+	 * @param Plugin $plugin
+	 * @param string $pluginName
+	 * @param string $pluginVersion
+	 */
+	public static function checkUpdate(Plugin $plugin, string $pluginName, string $pluginVersion){
+		$plugin->getLogger()->info("Checking for updates...");
+		$plugin->getServer()->getAsyncPool()->submitTask(new UpdateNotifyTask($pluginName, $pluginVersion));
+	}
+}---
+# DO NOT EDIT THIS VALUE.
+# ONLY FOR INTERNAL USE.
+data-version: 3
+
+# Changing titles of the scoreboard.
+# Can be of any number.
+server-names:
+- "§l§aServer §dName"
+- "§l§bServer §cName"
+- "§l§cServer §bName"
+- "§l§dServer §aName"
+
+# Currently Supported Tags:
+# {name}                    - Name of the player.
+# {money}                   - Money of the player. (Requires EconomyAPI by poggit-orphanage).
+# {online}                  - The number of online players.
+# {max_online}              - Max number of players allowed on the server.
+# {rank}                    - Players current in-game rank/group. (Requires PurePerms by poggit-orphanage).
+# {prefix}                  - Shows the prefix of the player. (Requires PureChat by poggit-orphanage).
+# {suffix}                  - Shows the suffix of the player. (Requires PureChat by poggit-orphanage).
+# {prison_rank}             - Get players Prison rank. (Requires RankUp by Falkirks).
+# {prison_next_rank_price}  - Get players next Prison rank price. (Requires RankUp by Falkirks).
+# {item_name}               - Name of the item in players hand.
+# {item_id}                 - ID of the item in players hand.
+# {item_meta}               - Meta/Damage of the item in players hand.
+# {item_count}              - Amount of item in the players hand.
+# {x}/{y}/{z}               - X/Y/Z coordinate of the player.
+# {faction}                 - Faction of the player. (Requires FactionsPro by poggit-orphanage).
+# {faction_power}           - Power of the faction. (Requires FactionsPro by poggit-orphanage).
+# {load}                    - Current load on the server (0 - 100%)
+# {tps}                     - TPS of the server.
+# {level_name}              - Name of the players current level/world.
+# {level_folder_name}       - Folder name of the players current level/world.
+# {ip}                      - IP of the player.
+# {ping}                    - Ping of the player.
+# {kills}                   - Get kill count of a player. (Requires KDR by JackMD).
+# {deaths}                  - Get death count of a player. (Requires KDR by JackMD).
+# {kdr}                     - Get kill to death ratio of a player. (Requires KDR by JackMD).
+# {time}                    - Show the current time. Please see 'time-format' and 'timezone' in config.yml to modify it.
+# {date}                    - Show the current date. Please see 'date-format' in config.yml to modify it.
+# {cps}                     - Get the clicks per second of a player. (Requires CPS by JackMD).
+# {is_state}                - Gets the state of your SkyBlock island. (Requires SkyBlock by GiantQuartz).
+# {is_blocks}               - Gets the number of blocks placed on your SkyBlock island. (Requires SkyBlock by GiantQuartz).
+# {is_members}              - Gets all the members of you SkyBlock island. (Requires SkyBlock by GiantQuartz).
+# {is_size}                 - Gets the size of your SkyBlock island. (Requires SkyBlock by GiantQuartz).
+# {is_rank}                 - Gets the SkyBlock rank of the player. (Requires SkyBlock by GiantQuartz).
+
+# Note: You can find links to the required/supported plugins via the README.md.
+# IMPORTANT NOTE: You can only set a maximum of 15 lines and no more.
+
+# You can edit the lines already set below and adjust them according to your needs.
+
+# If you want same scoreboard to be displayed in every world then set per-world-scoreboard to false in config.yml.
+#
+# If you have per-world-scoreboard enabled and want to display a default scoreboard for a world you didn't mention
+# in scoreboards key below then set use-default-score-lines to true in config.yml.
+#
+# After that edit the following score-lines to edit the scoreboard.
+score-lines:
+- " §dName: §5{name}"
+- " §bOnline: §a{online} §c/ §d{max_online}"
+
+# If you want to display different scoreboards for every world then set per-world-scoreboard to true in config.yml.
+# After that edit the following to suit your needs.
+scoreboards:
+# EXAMPLE CONFIGURATION:
+# -------------------
+# "world name":     | The name of the world. Enclose it in inverted commas.
+#   lines:          | This key is important. And the plugin won't function without it.
+#   - " Line #1"    | Line number one. You can use any of the above tags.
+#   - " Line #2"    | You can add a maximum of 15 lines.
+#--------------------
+  "world":
+    lines:
+    - " §dName: §5{name}"
+    - " §bOnline: §a{online} §c/ §d{max_online}"
+  "world 2":
+    lines:
+    - " §dTPS: §5{tps}"
+    - " §bLoad: §a{load}"
+...
+<?php
+declare(strict_types = 1);
+
+/*
+ *  _   _           _       _       _   _       _   _  __ _
+ * | | | |         | |     | |     | \ | |     | | (_)/ _(_)
+ * | | | |_ __   __| | __ _| |_ ___|  \| | ___ | |_ _| |_ _  ___ _ __
+ * | | | | '_ \ / _` |/ _` | __/ _ \ . ` |/ _ \| __| |  _| |/ _ \ '__|
+ * | |_| | |_) | (_| | (_| | ||  __/ |\  | (_) | |_| | | | |  __/ |
+ *  \___/| .__/ \__,_|\__,_|\__\___\_| \_/\___/ \__|_|_| |_|\___|_|
+ *       | |
+ *       |_|
+ *
+ * UpdateNotifier, a updater virion for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ *
+ * UpdateNotifier is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\libs\JackMD\UpdateNotifier\task;
+
+use pocketmine\scheduler\AsyncTask;
+use pocketmine\Server;
+use pocketmine\utils\Internet;
+
+class UpdateNotifyTask extends AsyncTask{
+	
+	/** @var string */
+	private const POGGIT_RELEASES_URL = "https://poggit.pmmp.io/releases.json?name=";
+	
+	/** @var string */
+	private $pluginName;
+	/** @var string */
+	private $pluginVersion;
+	
+	/**
+	 * UpdateNotifyTask constructor.
+	 *
+	 * @param string $pluginName
+	 * @param string $pluginVersion
+	 */
+	public function __construct(string $pluginName, string $pluginVersion){
+		$this->pluginName = $pluginName;
+		$this->pluginVersion = $pluginVersion;
+	}
+	
+	public function onRun(): void{
+		$json = Internet::getURL(self::POGGIT_RELEASES_URL . $this->pluginName, 10, [], $err);
+		$highestVersion = $this->pluginVersion;
+		$artifactUrl = "";
+		$api = "";
+		if($json !== false){
+			$releases = json_decode($json, true);
+			foreach($releases as $release){
+				if(version_compare($highestVersion, $release["version"], ">=")){
+					continue;
+				}
+				$highestVersion = $release["version"];
+				$artifactUrl = $release["artifact_url"];
+				$api = $release["api"][0]["from"] . " - " . $release["api"][0]["to"];
+			}
+		}
+		
+		$this->setResult([$highestVersion, $artifactUrl, $api, $err]);
+	}
+	
+	/**
+	 * @param Server $server
+	 */
+	public function onCompletion(Server $server): void{
+		$pluginName = $this->pluginName;
+		$plugin = $server->getPluginManager()->getPlugin($pluginName);
+		if($plugin === null){
+			return;
+		}
+		[$highestVersion, $artifactUrl, $api, $err] = $this->getResult();
+		if($err !== null){
+			$plugin->getLogger()->error("Update notify error: " . $err);
+		}
+		if($highestVersion === $this->pluginVersion){
+			$plugin->getLogger()->info("No new updates were found. You are using the latest version.");
+			return;
+		}
+		$artifactUrl = $artifactUrl . "/" . $pluginName . "_" . $highestVersion . ".phar";
+		$plugin->getLogger()->notice(vsprintf("Version %s has been released for API %s. Download the new release at %s", [$highestVersion, $api, $artifactUrl]));
+	}
+}<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\data;
+
+use _64FF00\PurePerms\PurePerms;
+use FactionsPro\FactionMain;
+use JackMD\CPS\CPS;
+use JackMD\KDR\KDR;
+use JackMD\ScoreHud\Main;
+use onebone\economyapi\EconomyAPI;
+use pocketmine\Player;
+use rankup\rank\Rank;
+use rankup\RankUp;
+use room17\SkyBlock\session\BaseSession as SkyBlockSession;
+use room17\SkyBlock\SkyBlock;
+
+class DataManager{
+	
+	/** @var Main */
+	private $plugin;
+	
+	public function __construct(Main $plugin){
+		$this->plugin = $plugin;
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return float|string
+	 */
+	public function getPlayerMoney(Player $player){
+		/** @var EconomyAPI $economyAPI */
+		$economyAPI = $this->plugin->getServer()->getPluginManager()->getPlugin("EconomyAPI");
+		if($economyAPI instanceof EconomyAPI){
+			return $economyAPI->myMoney($player);
+		}else{
+			return "Plugin not found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return string
+	 */
+	public function getPlayerRank(Player $player): string{
+		/** @var PurePerms $purePerms */
+		$purePerms = $this->plugin->getServer()->getPluginManager()->getPlugin("PurePerms");
+		if($purePerms instanceof PurePerms){
+			$group = $purePerms->getUserDataMgr()->getData($player)['group'];
+			if($group !== null){
+				return $group;
+			}else{
+				return "No Rank";
+			}
+		}else{
+			return "Plugin not found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return bool|int|string
+	 */
+	public function getRankUpRank(Player $player){
+		/** @var RankUp $rankUp */
+		$rankUp = $this->plugin->getServer()->getPluginManager()->getPlugin("RankUp");
+		if($rankUp instanceof RankUp){
+			$group = $rankUp->getRankUpDoesGroups()->getPlayerGroup($player);
+			if($group !== false){
+				return $group;
+			}else{
+				return "No Rank";
+			}
+		}
+		return "Plugin not found";
+	}
+
+	/**
+	 * @param Player $player
+	 * @return bool|Rank|string
+	 */
+	public function getRankUpRankPrice(Player $player){
+		/** @var RankUp $rankUp */
+		$rankUp = $this->plugin->getServer()->getPluginManager()->getPlugin("RankUp");
+		if($rankUp instanceof RankUp){
+			$nextRank = $rankUp->getRankStore()->getNextRank($player);
+			if($nextRank !== false){
+				return $nextRank->getPrice();
+			}else{
+				return "Max Rank";
+			}
+		}
+		return "Plugin not found";
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return string
+	 */
+	public function getPlayerFaction(Player $player): string{
+		/** @var FactionMain $factionsPro */
+		$factionsPro = $this->plugin->getServer()->getPluginManager()->getPlugin("FactionsPro");
+		if($factionsPro instanceof FactionMain){
+			$factionName = $factionsPro->getPlayerFaction($player->getName());
+			if($factionName === null){
+				return "No Faction";
+			}
+			return $factionName;
+		}
+		return "Plugin not found";
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return string
+	 */
+	public function getFactionPower(Player $player){
+		/** @var FactionMain $factionsPro */
+		$factionsPro = $this->plugin->getServer()->getPluginManager()->getPlugin("FactionsPro");
+		if($factionsPro instanceof FactionMain){
+			$factionName = $factionsPro->getPlayerFaction($player->getName());
+			if($factionName === null){
+				return "No Faction";
+			}
+			return $factionsPro->getFactionPower($factionName);
+		}
+		return "Plugin not found";
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return int|string
+	 */
+	public function getPlayerKills(Player $player){
+		/** @var KDR $kdr */
+		$kdr = $this->plugin->getServer()->getPluginManager()->getPlugin("KDR");
+		if($kdr instanceof KDR){
+			return $kdr->getProvider()->getPlayerKillPoints($player);
+		}else{
+			return "Plugin Not Found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return int|string
+	 */
+	public function getPlayerDeaths(Player $player){
+		/** @var KDR $kdr */
+		$kdr = $this->plugin->getServer()->getPluginManager()->getPlugin("KDR");
+		if($kdr instanceof KDR){
+			return $kdr->getProvider()->getPlayerDeathPoints($player);
+		}else{
+			return "Plugin Not Found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return string
+	 */
+	public function getPlayerKillToDeathRatio(Player $player): string{
+		/** @var KDR $kdr */
+		$kdr = $this->plugin->getServer()->getPluginManager()->getPlugin("KDR");
+		if($kdr instanceof KDR){
+			return $kdr->getProvider()->getKillToDeathRatio($player);
+		}else{
+			return "Plugin Not Found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @param null   $levelName
+	 * @return string
+	 */
+	public function getPrefix(Player $player, $levelName = null): string{
+		/** @var PurePerms $purePerms */
+		$purePerms = $this->plugin->getServer()->getPluginManager()->getPlugin("PurePerms");
+		if($purePerms instanceof PurePerms){
+			$prefix = $purePerms->getUserDataMgr()->getNode($player, "prefix");
+			if($levelName === null){
+				if(($prefix === null) || ($prefix === "")){
+					return "No Prefix";
+				}
+				return (string) $prefix;
+			}else{
+				$worldData = $purePerms->getUserDataMgr()->getWorldData($player, $levelName);
+				if(empty($worldData["prefix"]) || $worldData["prefix"] == null){
+					return "No Prefix";
+				}
+				return $worldData["prefix"];
+			}
+		}else{
+			return "Plugin not found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @param null   $levelName
+	 * @return string
+	 */
+	public function getSuffix(Player $player, $levelName = null): string{
+		/** @var PurePerms $purePerms */
+		$purePerms = $this->plugin->getServer()->getPluginManager()->getPlugin("PurePerms");
+		if($purePerms instanceof PurePerms){
+			$suffix = $purePerms->getUserDataMgr()->getNode($player, "suffix");
+			if($levelName === null){
+				if(($suffix === null) || ($suffix === "")){
+					return "No Suffix";
+				}
+				return (string) $suffix;
+			}else{
+				$worldData = $purePerms->getUserDataMgr()->getWorldData($player, $levelName);
+				if(empty($worldData["suffix"]) || $worldData["suffix"] == null){
+					return "No Suffix";
+				}
+				return $worldData["suffix"];
+			}
+		}else{
+			return "Plugin not found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return int|string
+	 */
+	public function getClicks(Player $player){
+		/** @var CPS $cps */
+		$cps = $this->plugin->getServer()->getPluginManager()->getPlugin("CPS");
+		if($cps instanceof CPS){
+			return $cps->getClicks($player);
+		}else{
+			return "Plugin Not Found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return int|string
+	 */
+	public function getIsleBlocks(Player $player){
+		/** @var SkyBlock $sb */
+		$sb = $this->plugin->getServer()->getPluginManager()->getPlugin("SkyBlock");
+		if($sb instanceof SkyBlock){
+			$session = $sb->getSessionManager()->getSession($player);
+			if((is_null($session)) || (!$session->hasIsle())){
+				return "No Island";
+			}
+			$isle = $session->getIsle();
+			return $isle->getBlocksBuilt();
+		}else{
+			return "Plugin Not Found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return string
+	 */
+	public function getIsleSize(Player $player){
+		/** @var SkyBlock $sb */
+		$sb = $this->plugin->getServer()->getPluginManager()->getPlugin("SkyBlock");
+		if($sb instanceof SkyBlock){
+			$session = $sb->getSessionManager()->getSession($player);
+			if((is_null($session)) || (!$session->hasIsle())){
+				return "No Island";
+			}
+			$isle = $session->getIsle();
+			return $isle->getCategory();
+		}else{
+			return "Plugin Not Found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return int|string
+	 */
+	public function getIsleMembers(Player $player){
+		/** @var SkyBlock $sb */
+		$sb = $this->plugin->getServer()->getPluginManager()->getPlugin("SkyBlock");
+		if($sb instanceof SkyBlock){
+			$session = $sb->getSessionManager()->getSession($player);
+			if((is_null($session)) || (!$session->hasIsle())){
+				return "No Island";
+			}
+			$isle = $session->getIsle();
+			return count($isle->getMembers());
+		}else{
+			return "Plugin Not Found";
+		}
+	}
+	
+	/**
+	 * @param Player $player
+	 * @return string
+	 */
+	public function getIsleState(Player $player){
+		/** @var SkyBlock $sb */
+		$sb = $this->plugin->getServer()->getPluginManager()->getPlugin("SkyBlock");
+		if($sb instanceof SkyBlock){
+			$session = $sb->getSessionManager()->getSession($player);
+			if((is_null($session)) || (!$session->hasIsle())){
+				return "No Island";
+			}
+			$isle = $session->getIsle();
+			return $isle->isLocked() ? "Locked" : "Unlocked";
+		}else{
+			return "Plugin Not Found";
+		}
+	}
+
+	/**
+	 * @param Player $player
+	 * @return string
+	 */
+	public function getIsleRank(Player $player){
+		/** @var SkyBlock $sb */
+		$sb = $this->plugin->getServer()->getPluginManager()->getPlugin("SkyBlock");
+		if($sb instanceof SkyBlock){
+			$session = $sb->getSessionManager()->getSession($player);
+			if((is_null($session)) || (!$session->hasIsle())){
+				return "No Island";
+			}
+			switch($session->getRank()){
+				case SkyBlockSession::RANK_DEFAULT:
+					return "Member";
+				case SkyBlockSession::RANK_OFFICER:
+					return "Officer";
+				case SkyBlockSession::RANK_LEADER:
+					return "Leader";
+				case SkyBlockSession::RANK_FOUNDER:
+					return "Founder";
+			}
+			return "No Rank";
+		}else{
+			return "Plugin Not Found";
+		}
+	}
+}
+<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\commands;
+
+use JackMD\ScoreHud\libs\JackMD\ScoreFactory\ScoreFactory;
+use JackMD\ScoreHud\Main;
+use pocketmine\command\CommandSender;
+use pocketmine\command\PluginCommand;
+use pocketmine\Player;
+
+class ScoreHudCommand extends PluginCommand{
+
+	/** @var Main */
+	private $plugin;
+
+	public function __construct(Main $plugin){
+		parent::__construct("scorehud", $plugin);
+		$this->setDescription("Shows ScoreHud Commands");
+		$this->setUsage("/scorehud <on|off|about|help>");
+		$this->setAliases(["sh"]);
+		$this->setPermission("sh.command.sh");
+
+		$this->plugin = $plugin;
+	}
+
+	public function execute(CommandSender $sender, string $commandLabel, array $args){
+		if(!$this->testPermission($sender)){
+			return true;
+		}
+		if(!$sender instanceof Player){
+			$sender->sendMessage(Main::PREFIX . "§cYou can only use this command in-game.");
+
+			return false;
+		}
+		if(!isset($args[0])){
+			$sender->sendMessage(Main::PREFIX . "§cUsage: /scorehud <on|off|about|help>");
+
+			return false;
+		}
+		switch($args[0]){
+			case "about":
+				$sender->sendMessage(Main::PREFIX . "§6Score§eHud §av" . $this->plugin->getDescription()->getVersion() . "§a.Plugin by §dJackMD§a. Contact on §bTwitter: JackMTaylor_ §aor §bDiscord: JackMD#3717§a.");
+				break;
+
+			case "on":
+				if(isset($this->plugin->disabledScoreHudPlayers[strtolower($sender->getName())])){
+					unset($this->plugin->disabledScoreHudPlayers[strtolower($sender->getName())]);
+					$sender->sendMessage(Main::PREFIX . "§aSuccessfully enabled ScoreHud.");
+				}else{
+					$sender->sendMessage(Main::PREFIX . "§cScoreHud is already enabled for you.");
+				}
+				break;
+
+			case "off":
+				if(!isset($this->plugin->disabledScoreHudPlayers[strtolower($sender->getName())])){
+					ScoreFactory::removeScore($sender);
+
+					$this->plugin->disabledScoreHudPlayers[strtolower($sender->getName())] = 1;
+					$sender->sendMessage(Main::PREFIX . "§cSuccessfully disabled ScoreHud.");
+				}else{
+					$sender->sendMessage(Main::PREFIX . "§aScoreHud is already disabled for you.");
+				}
+				break;
+
+			case "help":
+			default:
+				$sender->sendMessage(Main::PREFIX . "§cUsage: /scorehud <on|off|about|help>");
+				break;
+		}
+
+		return false;
+	}
+}
+<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud;
+
+use JackMD\ScoreHud\libs\JackMD\ScoreFactory\ScoreFactory;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerQuitEvent;
+
+class EventListener implements Listener{
+	
+	/** @var Main */
+	private $plugin;
+	
+	/**
+	 * EventListener constructor.
+	 *
+	 * @param Main $plugin
+	 */
+	public function __construct(Main $plugin){
+		$this->plugin = $plugin;
+	}
+	
+	/**
+	 * @param PlayerQuitEvent $event
+	 */
+	public function onQuit(PlayerQuitEvent $event){
+		$player = $event->getPlayer();
+		ScoreFactory::removeScore($player);
+	}
+}<?php
+declare(strict_types = 1);
+
+/**
+ *     _____                    _   _           _
+ *    /  ___|                  | | | |         | |
+ *    \ `--.  ___ ___  _ __ ___| |_| |_   _  __| |
+ *     `--. \/ __/ _ \| '__/ _ \  _  | | | |/ _` |
+ *    /\__/ / (_| (_) | | |  __/ | | | |_| | (_| |
+ *    \____/ \___\___/|_|  \___\_| |_/\__,_|\__,_|
+ *
+ * ScoreHud, a Scoreboard plugin for PocketMine-MP
+ * Copyright (c) 2018 JackMD  < https://github.com/JackMD >
+ *
+ * Discord: JackMD#3717
+ * Twitter: JackMTaylor_
+ *
+ * This software is distributed under "GNU General Public License v3.0".
+ * This license allows you to use it and/or modify it but you are not at
+ * all allowed to sell this plugin at any cost. If found doing so the
+ * necessary action required would be taken.
+ *
+ * ScoreHud is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License v3.0 for more details.
+ *
+ * You should have received a copy of the GNU General Public License v3.0
+ * along with this program. If not, see
+ * <https://opensource.org/licenses/GPL-3.0>.
+ * ------------------------------------------------------------------------
+ */
+
+namespace JackMD\ScoreHud\task;
+
+use JackMD\ScoreHud\Main;
+use pocketmine\scheduler\Task;
+use pocketmine\utils\Config;
+
+class ScoreUpdateTask extends Task{
+	
+	/** @var Main */
+	private $plugin;
+	/** @var int */
+	private $titleIndex = 0;
+	
+	/**
+	 * ScoreUpdateTask constructor.
+	 *
+	 * @param Main $plugin
+	 */
+	public function __construct(Main $plugin){
+		$this->plugin = $plugin;
+		$this->titleIndex = 0;
+	}
+	
+	/**
+	 * @param int $tick
+	 */
+	public function onRun(int $tick){
+		$players = $this->plugin->getServer()->getOnlinePlayers();
+		$dataConfig = new Config($this->plugin->getDataFolder() . "data.yml", Config::YAML);
+		$titles = $dataConfig->get("server-names");
+		if((is_null($titles)) || empty($titles) || !isset($titles)){
+			$this->plugin->getLogger()->error("Please set server-names in data.yml properly.");
+			$this->plugin->getServer()->getPluginManager()->disablePlugin($this->plugin);
+			return;
+		}
+		if(!isset($titles[$this->titleIndex])){
+			$this->titleIndex = 0;
+		}
+		foreach($players as $player){
+			$this->plugin->addScore($player, $titles[$this->titleIndex]);
+		}
+		$this->titleIndex++;
+	}
+}

@@ -1,0 +1,19 @@
+name: SClearLagg
+main: Sergey_Dertan\SClearLagg\SClearLaggMainFolder\SClearLaggMain
+api: 1.8.0
+load: STARTUP
+author: Sergey_Dertan
+description: "Limpieza automatica de Lagg"
+version: 1
+commands:
+ scl:
+  permissions: scl.scl
+  description: "Ayuda ClearLagg"
+permissions:
+ sclearlagg:
+  description: "Derecho maximo"
+  default: op
+  children:
+   scl.scl:
+    default: op
+    description: "Реrmitir el uso de el commando /scl"

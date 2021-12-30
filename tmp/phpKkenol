@@ -1,0 +1,1125 @@
+<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags;
+
+use sys\jordan\tags\session\SessionManager;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\plugin\PluginBase;
+use pocketmine\event\Listener;
+
+class PlayerTagsBase extends PluginBase implements Listener {
+
+	/** @var SessionManager */
+	private $sessionManager;
+
+	/** @var TagFactory */
+	private $tagFactory;
+
+	/** @var self */
+	private static $instance;
+
+	public function onLoad(): void {
+		self::$instance = $this;
+		$this->saveDefaultConfig();
+		$this->sessionManager = new SessionManager($this);
+		$this->tagFactory = new TagFactory($this);
+	}
+
+	public function onEnable(): void {
+		$this->getTagFactory()->enable();
+		$this->getSessionManager()->onEnable();
+		new PlayerTagsListener($this);
+	}
+
+	/**
+	 * @return PlayerTagsBase
+	 */
+	public static function getInstance(): PlayerTagsBase {
+		return self::$instance;
+	}
+
+	/**
+	 * @return SessionManager
+	 */
+	public function getSessionManager(): SessionManager {
+		return $this->sessionManager;
+	}
+
+	/**
+	 * @return TagFactory
+	 */
+	public function getTagFactory(): TagFactory {
+		return $this->tagFactory;
+	}
+
+}
+<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\session;
+
+
+use pocketmine\Player;
+use pocketmine\utils\UUID;
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\utils\PlayerTagsBaseTrait;
+use function array_filter;
+use function array_key_exists;
+use function array_search;
+
+class SessionManager {
+
+	use PlayerTagsBaseTrait;
+
+	/** @var PlayerSession[] */
+	private $sessions = [];
+
+	/**
+	 * SessionManager constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		$this->setPlugin($plugin);
+	}
+
+	/**
+	 * In the case of a reload, kick the players to ensure valid sessions
+	 */
+	public function onEnable(): void {
+		$players = $this->getPlugin()->getServer()->getOnlinePlayers();
+		if(count($players) > 0) {
+			foreach($players as $player) {
+				$player->kick("Invalid session detected. Please join back to validate your session!", false);
+			}
+		}
+	}
+
+	/**
+	 * @param UUID $uuid
+	 * @return PlayerSession|null
+	 */
+	public function create(UUID $uuid): PlayerSession {
+		return ($this->sessions[$uuid->toString()] = new PlayerSession($uuid));
+	}
+
+	/**
+	 * @param Player $player
+	 */
+	public function remove(Player $player): void {
+		if(array_key_exists($player->getUniqueId()->toString(), $this->sessions)) {
+			($this->sessions[$player->getUniqueId()->toString()])->destroy();
+			unset($this->sessions[$player->getUniqueId()->toString()]);
+		}
+	}
+
+	/**
+	 * @param PlayerSession $session
+	 */
+	public function delete(PlayerSession $session) {
+		if(($key = array_search($session, $this->sessions, true)) !== false) {
+			$session->destroy();
+			unset($this->sessions[$key]);
+		}
+	}
+
+	/**
+	 * @param Player $player
+	 * @return PlayerSession|null
+	 */
+	public function find(Player $player): ?PlayerSession {
+		return $this->sessions[$player->getUniqueId()->toString()] ?? null;
+	}
+
+	/**
+	 * @return PlayerSession[]
+	 */
+	public function getSessions(): array {
+		return $this->sessions;
+	}
+
+	public function clear(): void {
+		$this->sessions = [];
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\utils;
+
+
+use sys\jordan\tags\PlayerTagsBase;
+
+trait PlayerTagsBaseTrait {
+
+	/** @var PlayerTagsBase */
+	private $plugin;
+
+	/**
+	 * @return PlayerTagsBase
+	 */
+	public function getPlugin(): PlayerTagsBase {
+		return $this->plugin;
+	}
+
+	/**
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function setPlugin(PlayerTagsBase $plugin): void {
+		$this->plugin = $plugin;
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag;
+
+use Exception;
+use pocketmine\scheduler\ClosureTask;
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\group\defaults\AdvancedJobsTagGroup;
+use sys\jordan\tags\tag\group\defaults\CombatLoggerTagGroup;
+use sys\jordan\tags\tag\group\defaults\DefaultTagGroup;
+use sys\jordan\tags\tag\group\defaults\EconomyAPITagGroup;
+use sys\jordan\tags\tag\group\defaults\FactionsProTagGroup;
+use sys\jordan\tags\tag\group\defaults\KDRTagGroup;
+use sys\jordan\tags\tag\group\defaults\PiggyFactionsTagGroup;
+use sys\jordan\tags\tag\group\defaults\PurePermsTagGroup;
+use sys\jordan\tags\tag\group\defaults\RankUpTagGroup;
+use sys\jordan\tags\tag\group\defaults\RedSkyBlockTagGroup;
+use sys\jordan\tags\tag\group\defaults\SkyBlockTagGroup;
+use sys\jordan\tags\tag\group\TagGroup;
+use sys\jordan\tags\utils\PlayerTagsBaseTrait;
+use pocketmine\Player;
+use pocketmine\utils\TextFormat;
+
+use function array_key_exists;
+use function count;
+use function str_ireplace;
+use function str_replace;
+use function strlen;
+
+class TagFactory {
+
+	use PlayerTagsBaseTrait;
+
+	/** @var Tag[] */
+	private $tags = [];
+
+	/** @var string */
+	private $tag;
+
+	/** @var string */
+	private $colorCharacter;
+
+	/** @var int */
+	private $updatePeriod;
+
+	/** @var MultiWorldTagManager */
+	private $tagManager;
+
+	/**
+	 * TagFactory constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		$this->setPlugin($plugin);
+		$this->tag = $plugin->getConfig()->get("tag", "");
+		$this->colorCharacter = $plugin->getConfig()->get("color-character", "&");
+		$this->updatePeriod = $plugin->getConfig()->get("update-period", 10);
+		$this->tagManager = new MultiWorldTagManager($this, $this->getPlugin()->getConfig());
+		$this->registerTags();
+	}
+
+	public function enable(): void {
+		/*
+		 * Only start task if the tag string length > 0
+		 */
+		if(strlen($this->getTagString()) > 0) {
+			$this->getPlugin()->getScheduler()->scheduleRepeatingTask(new ClosureTask(function (int $currentTick): void {
+				$this->update();
+			}), $this->getUpdatePeriod());
+		}
+	}
+
+	/**
+	 * @return string
+	 */
+	public function getTagString(): string {
+		return $this->tag;
+	}
+
+	/**
+	 * @return string
+	 */
+	public function getColorCharacter(): string {
+		return $this->colorCharacter;
+	}
+
+	/**
+	 * @return int
+	 */
+	public function getUpdatePeriod(): int {
+		return $this->updatePeriod;
+	}
+
+	/**
+	 * @return MultiWorldTagManager
+	 */
+	public function getTagManager(): MultiWorldTagManager {
+		return $this->tagManager;
+	}
+
+	public function registerTags(): void {
+		$this->registerGroup(new AdvancedJobsTagGroup($this->getPlugin()));
+		$this->registerGroup(new CombatLoggerTagGroup($this->getPlugin()));
+		$this->registerGroup(new DefaultTagGroup($this->getPlugin()));
+		$this->registerGroup(new EconomyAPITagGroup($this->getPlugin()));
+		$this->registerGroup(new FactionsProTagGroup($this->getPlugin()));
+		$this->registerGroup(new KDRTagGroup($this->getPlugin()));
+		$this->registerGroup(new PiggyFactionsTagGroup($this->getPlugin()));
+		$this->registerGroup(new PurePermsTagGroup($this->getPlugin()));
+		$this->registerGroup(new RankUpTagGroup($this->getPlugin()));
+		$this->registerGroup(new RedSkyBlockTagGroup($this->getPlugin()));
+		$this->registerGroup(new SkyBlockTagGroup($this->getPlugin()));
+		$count = count($this->getTags());
+		$this->getPlugin()->getLogger()->info(TextFormat::YELLOW . "Successfully loaded $count tags!");
+	}
+
+	/**
+	 * @param Tag $tag
+	 * @param bool $force
+	 */
+	public function register(Tag $tag, bool $force = false): void {
+		if(array_key_exists($tag->getName(), $this->tags) && !$force) {
+			$this->getPlugin()->getLogger()->error(TextFormat::RED . "Attempted to register tag that's already been registered: {$tag->getName()}");
+			return;
+		}
+		$this->tags[$tag->getName()] = $tag;
+	}
+
+	/**
+	 * @param TagGroup $group
+	 */
+	public function registerGroup(TagGroup $group): void {
+		$tags = $group->load($this);
+		if(count($tags) > 0) {
+			foreach($tags as $tag) $this->register($tag);
+		}
+	}
+
+	/**
+	 * @return Tag[]
+	 */
+	public function getTags(): array {
+		return $this->tags;
+	}
+
+	/**
+	 * @param string $input
+	 */
+	public function replaceVisuals(string &$input): void {
+		$input = str_replace($this->getColorCharacter(), TextFormat::ESCAPE, $input);
+		$input = str_ireplace("{line}", "\n", $input);
+	}
+
+	/**
+	 * @param Player $player
+	 * @return string
+	 */
+	public function replace(Player $player): string {
+		if(strlen($this->tag) <= 0) {
+			return "";
+		}
+		$output = $this->getTagManager()->getTagForLevel($player);
+		foreach($this->getTags() as $tag) {
+			try {
+				$tag->replace($player, $output);
+			} catch (Exception $exception) {
+				//just in case a malformed tag callback happens
+				$this->getPlugin()->getLogger()->logException($exception);
+			}
+		}
+		$this->replaceVisuals($output);
+		return $output;
+	}
+
+	public function update(): void {
+		foreach($this->getPlugin()->getServer()->getOnlinePlayers() as $player) {
+			$player->setScoreTag($this->replace($player));
+		}
+	}
+
+}<?php
+
+
+namespace sys\jordan\tags\tag;
+
+
+use pocketmine\Player;
+use pocketmine\utils\Config;
+use function array_key_exists;
+
+class MultiWorldTagManager {
+
+	/** @var TagFactory */
+	private $factory;
+
+	/** @var bool */
+	private $enabled;
+
+	/** @var string[] */
+	private $tags;
+
+	/**
+	 * MultiWorldTagManager constructor.
+	 * @param TagFactory $factory
+	 * @param Config $config
+	 */
+	public function __construct(TagFactory $factory, Config $config) {
+		$this->factory = $factory;
+		$this->enabled = $config->getNested("multi-world.enabled", false);
+		$this->tags = $config->getNested("multi-world.worlds", []);
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function isEnabled(): bool {
+		return $this->enabled;
+	}
+
+	/**
+	 * @return TagFactory
+	 */
+	public function getFactory(): TagFactory {
+		return $this->factory;
+	}
+
+	/**
+	 * @return string[]
+	 */
+	public function getTags(): array {
+		return $this->tags;
+	}
+
+	/**
+	 * @param string $key
+	 * @return string|null
+	 */
+	public function getTag(string $key): ?string {
+		return $this->tags[$key] ?? null;
+	}
+
+	/**
+	 * @param string $key
+	 * @return bool
+	 */
+	public function hasTag(string $key): bool {
+		return array_key_exists($key, $this->tags);
+	}
+
+	/**
+	 * @param Player $player
+	 * @return string
+	 */
+	public function getTagForLevel(Player $player): string {
+		return ($this->isEnabled() && $player->isValid() && $this->hasTag($player->getLevel()->getFolderName())) ? $this->getTag($player->getLevel()->getFolderName()) : $this->getFactory()->getTagString();
+	}
+
+}<?php
+
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+
+class AdvancedJobsTagGroup extends PluginTagGroup {
+
+	/**
+	 * AdvancedJobsTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "AdvancedJobs");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedMethodInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("job", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->hasJob($player) ? $plugin->getJob($player) : "Unemployed";
+			}),
+			new ExternalPluginTag("job_information", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->hasJob($player) ? $plugin->getJobInformation($player) : "";
+			}),
+			new ExternalPluginTag("job_progress", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->hasJob($player) ? $plugin->getProgress($player) : "-1";
+			})
+		];
+	}
+
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag\group;
+
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\Tag;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\plugin\Plugin;
+use pocketmine\plugin\PluginBase;
+use pocketmine\utils\TextFormat;
+
+abstract class PluginTagGroup extends TagGroup {
+
+	/** @var Plugin|null */
+	private $externalPlugin;
+
+	/**
+	 * PluginTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 * @param string $pluginName
+	 */
+	public function __construct(PlayerTagsBase $plugin, string $pluginName) {
+		parent::__construct($plugin);
+		$this->externalPlugin = $plugin->getServer()->getPluginManager()->getPlugin($pluginName);
+	}
+
+	/**
+	 * @return Plugin|null
+	 */
+	public function getExternalPlugin(): ?Plugin {
+		return $this->externalPlugin;
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function check(): bool {
+		return $this->getExternalPlugin() instanceof PluginBase;
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return Tag[]
+	 */
+	public function load(TagFactory $factory): array {
+		if($this->check()) {
+			$this->getPlugin()->getLogger()->info(TextFormat::GREEN . "{$this->getExternalPlugin()->getDescription()->getName()} support has been enabled!");
+			return $this->register($factory);
+		}
+		return [];
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 */
+	abstract public function register(TagFactory $factory): array;
+
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag\group;
+
+
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\Tag;
+use sys\jordan\tags\tag\TagFactory;
+use sys\jordan\tags\utils\PlayerTagsBaseTrait;
+
+abstract class TagGroup {
+
+	use PlayerTagsBaseTrait;
+
+	/**
+	 * TagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		$this->setPlugin($plugin);
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return Tag[]
+	 */
+	abstract public function load(TagFactory $factory): array;
+
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+
+class CombatLoggerTagGroup extends PluginTagGroup {
+
+	/**
+	 * CombatLoggerTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "CombatLogger");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedMethodInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("timer", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return (string) $plugin->getTagDuration($player) ?? "";
+			})
+		];
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use pocketmine\entity\Effect;
+use pocketmine\Server;
+use pocketmine\utils\TextFormat;
+use sys\jordan\tags\tag\group\TagGroup;
+use sys\jordan\tags\tag\Tag;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\Player;
+use function round;
+use function str_repeat;
+use function substr_replace;
+
+class DefaultTagGroup extends TagGroup {
+
+	/**
+	 * @param TagFactory $factory
+	 * @return array
+	 */
+	public function load(TagFactory $factory): array {
+		return [
+			new Tag("x", function (Player $player): string {
+				return (string) $player->getFloorX();
+			}),
+			new Tag("y", function (Player $player): string {
+				return (string) $player->getFloorY();
+			}),
+			new Tag("z", function (Player $player): string {
+				return (string) $player->getFloorZ();
+			}),
+			new Tag("level", function (Player $player): string {
+				return $player->isValid() ? $player->getLevel()->getName() : "unknown";
+			}),
+			new Tag("item_id", function (Player $player): string {
+				return (string) $player->getInventory()->getItemInHand()->getId();
+			}),
+			new Tag("item_damage", function (Player $player): string {
+				return (string) $player->getInventory()->getItemInHand()->getDamage();
+			}),
+			new Tag("item_count", function (Player $player): string {
+				return (string) $player->getInventory()->getItemInHand()->getCount();
+			}),
+			new Tag("item_name", function (Player $player): string {
+				return $player->getInventory()->getItemInHand()->getName();
+			}),
+			new Tag("ip", function (Player $player): string {
+				return $player->getAddress();
+			}),
+			new Tag("gamemode", function (Player $player): string {
+				return Server::getGamemodeName($player->getGamemode());
+			}),
+			new Tag("ping", function (Player $player): string {
+				return (string) $player->getPing();
+			}),
+			new Tag("cps", function (Player $player): string {
+				$session = $this->getPlugin()->getSessionManager()->find($player);
+				return (string) ($session !== null ? $session->getClicksPerSecond() : 0);
+			}),
+			new Tag("health", function (Player $player): string {
+				return (string) round($player->getHealth(), 2);
+			}),
+			new Tag("max_health", function (Player $player): string {
+				return (string) $player->getMaxHealth();
+			}),
+			new Tag("health_bar", function (Player $player): string {
+				$healthString = str_repeat("|", (int) $player->getMaxHealth());
+				$color = TextFormat::GREEN;
+				if($player->hasEffect(Effect::POISON)) {
+					$color = TextFormat::YELLOW;
+				} else if($player->hasEffect(Effect::WITHER)) {
+					$color = TextFormat::LIGHT_PURPLE;
+				}
+				return $color . ($player->getHealth() < $player->getMaxHealth() ? (substr_replace($healthString, TextFormat::RED, (int) $player->getHealth() - 1, 0)) : $healthString) . ($player->getAbsorption() > 0 ? TextFormat::GOLD . str_repeat("|", (int) $player->getAbsorption()) : "");
+			}),
+			new Tag("device", function (Player $player): string {
+				$session = $this->getPlugin()->getSessionManager()->find($player);
+				return $session !== null ? $session->getDevice() : "";
+			}),
+			new Tag("input_mode", function (Player $player): string{
+				$session = $this->getPlugin()->getSessionManager()->find($player);
+				return $session !== null ? $session->getInputModeString() : "";
+			}),
+			new Tag("os", function (Player $player): string {
+				$session = $this->getPlugin()->getSessionManager()->find($player);
+				return $session !== null ? $session->getOSString() : "";
+			})
+		];
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag;
+
+use pocketmine\Player;
+use function str_ireplace;
+
+class Tag {
+
+	/** @var string */
+	private $name;
+
+	/** @var callable */
+	protected $replaceCallback;
+
+	/**
+	 * Tag constructor.
+	 * @param string $name
+	 * @param $replaceCallback
+	 */
+	public function __construct(string $name, callable $replaceCallback) {
+		$this->name = $name;
+		$this->replaceCallback = $replaceCallback;
+	}
+
+	/**
+	 * @return string
+	 */
+	public function getName(): string {
+		return $this->name;
+	}
+	/**
+	 * @param Player $player
+	 * @param string $input
+	 */
+	public function replace(Player $player, string &$input): void {
+		$output = ($this->replaceCallback)($player);
+		if($output === null) return;
+		$input = str_ireplace("{". $this->getName() . "}", $output, $input);
+	}
+
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+
+class EconomyAPITagGroup extends PluginTagGroup {
+
+	/**
+	 * EconomyAPITagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "EconomyAPI");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedMethodInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("money_prefix", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->getMonetaryUnit();
+			}),
+			new ExternalPluginTag("money", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return (string) $plugin->myMoney($player);
+			})
+		];
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag;
+
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+use function str_ireplace;
+
+class ExternalPluginTag extends Tag {
+
+	/** @var Plugin */
+	private $plugin;
+
+	/**
+	 * ExternalPluginTag constructor.
+	 * @param string $name
+	 * @param Plugin $externalPlugin
+	 * @param callable $replaceCallback
+	 */
+	public function __construct(string $name, Plugin $externalPlugin, callable $replaceCallback) {
+		parent::__construct($name, $replaceCallback);
+		$this->plugin = $externalPlugin;
+	}
+
+	/**
+	 * @return Plugin|null
+	 */
+	public function getPlugin(): Plugin {
+		return $this->plugin;
+	}
+
+	/**
+	 * @param Player $player
+	 * @param string $input
+	 */
+	public function replace(Player $player, string &$input): void {
+		$output = ($this->replaceCallback)($player, $this->getPlugin());
+		if($output === null) return;
+		$input = str_ireplace("{". $this->getName() . "}", $output, $input);
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+
+class FactionsProTagGroup extends PluginTagGroup {
+
+	/**
+	 * FactionsProTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "FactionsPro");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedMethodInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("faction_name", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->getPlayerFaction($player) ?? "None";
+			}),
+			new ExternalPluginTag("faction_power", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				$faction = $plugin->getPlayerFaction($player);
+				return (string) ($faction !== null ?  $plugin->getFactionPower($faction) ?? "" : "");
+			})
+		];
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+
+class KDRTagGroup extends PluginTagGroup {
+
+	/**
+	 * KDRTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "KDR");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedMethodInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("kills", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return (string) ($plugin->getProvider()->playerExists($player) ? $plugin->getProvider()->getPlayerKillPoints($player) : 0);
+			}),
+			new ExternalPluginTag("deaths", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return (string) ($plugin->getProvider()->playerExists($player) ? (string) $plugin->getProvider()->getPlayerDeathPoints($player) : 0);
+			}),
+			new ExternalPluginTag("kdr", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return (string) ($plugin->getProvider()->playerExists($player) ? $plugin->getProvider()->getKillToDeathRatio($player) : "0.0");
+			}),
+
+		];
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+use function round;
+use const PHP_ROUND_HALF_DOWN;
+
+class PiggyFactionsTagGroup extends PluginTagGroup {
+
+	/**
+	 * PiggyFactionsTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "PiggyFactions");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedMethodInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("faction_name", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				$player = $plugin->getPlayerManager()->getPlayer($player->getUniqueId());
+				return $player !== null && $player->getFaction() !== null ? $player->getFaction()->getName() : "None";
+			}),
+			new ExternalPluginTag("faction_power", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				$player = $plugin->getPlayerManager()->getPlayer($player->getUniqueId());
+				return $player !== null && $player->getFaction() !== null ? (string) round($player->getFaction()->getPower() ?? -1, 2, PHP_ROUND_HALF_DOWN) : "";
+			}),
+			new ExternalPluginTag("faction_rank", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				$player = $plugin->getPlayerManager()->getPlayer($player->getUniqueId());
+				return $player !== null && $player->getRole() !== null ? $player->getRole() : "";
+			})
+		];
+	}
+
+
+}<?php
+
+declare(strict_types=1);
+
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+
+class PurePermsTagGroup extends PluginTagGroup {
+
+	/**
+	 * PurePermsTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "PurePerms");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedMethodInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("rank", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->getUserDataMgr()->getGroup($player)->getName() ?? "N/A";
+			}),
+			new ExternalPluginTag("prefix", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->getUserDataMgr()->getNode($player, "prefix") ?? "";
+			}),
+			new ExternalPluginTag("suffix", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->getUserDataMgr()->getNode($player, "suffix") ?? "";
+			})
+		];
+	}
+}<?php
+
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+
+class RankUpTagGroup extends PluginTagGroup {
+
+	/**
+	 * RankUpTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "RankUp");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedMethodInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("rankup", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return ($group = $plugin->getPermManager()->getGroup($player)) !== false ? $group : "N/A";
+			})
+		];
+	}
+}<?php
+
+declare(strict_types=1);
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+
+class RedSkyBlockTagGroup extends PluginTagGroup {
+
+	/**
+	 * RedSkyBlockTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "RedSkyBlock");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedMethodInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("island_name", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->getIslandName($player) ?? "";
+			}),
+			new ExternalPluginTag("island_rank", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return $plugin->calcRank($player->getLowerCaseName()) ?? "";
+			}),
+			new ExternalPluginTag("island_value", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				return (string) $plugin->getValue($player) ?? "";
+			})
+		];
+	}
+}<?php
+
+
+namespace sys\jordan\tags\tag\group\defaults;
+
+
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+use room17\SkyBlock\island\RankIds;
+use sys\jordan\tags\PlayerTagsBase;
+use sys\jordan\tags\tag\ExternalPluginTag;
+use sys\jordan\tags\tag\group\PluginTagGroup;
+use sys\jordan\tags\tag\TagFactory;
+
+class SkyBlockTagGroup extends PluginTagGroup {
+
+	/**
+	 * SkyBlockTagGroup constructor.
+	 * @param PlayerTagsBase $plugin
+	 */
+	public function __construct(PlayerTagsBase $plugin) {
+		parent::__construct($plugin, "SkyBlock");
+	}
+
+	/**
+	 * @param TagFactory $factory
+	 * @return ExternalPluginTag[]
+	 * @noinspection PhpUndefinedClassInspection
+	 */
+	public function register(TagFactory $factory): array {
+		return [
+			new ExternalPluginTag("island_category", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				$session = $plugin->getSessionManager()->getSession($player);
+				return $session->hasIsland() ? $session->getIsland()->getCategory() : "N/A";
+			}),
+			new ExternalPluginTag("island_rank", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				switch($plugin->getSessionManager()->getSession($player)->getRank()) {
+					case RankIds::MEMBER:
+						return "Member";
+					case RankIds::OFFICER:
+						return "Officer";
+					case RankIds::LEADER:
+						return "Leader";
+					case RankIds::FOUNDER:
+						return "Founder";
+					default:
+						return "Unknown";
+				}
+			}),
+			new ExternalPluginTag("island_type", $this->getExternalPlugin(), function (Player $player, Plugin $plugin): string {
+				$session = $plugin->getSessionManager()->getSession($player);
+				return $session->hasIsland() ? $session->getIsland()->getType() : "N/A";
+			})
+		];
+	}
+}

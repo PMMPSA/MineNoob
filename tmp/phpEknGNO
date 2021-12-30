@@ -1,0 +1,926 @@
+<?php
+
+declare(strict_types=1);
+
+namespace SaltyPixelDevz\CustomShopUIv2;
+
+use onebone\economyapi\EconomyAPI;
+use pmmp\TesterPlugin\TestFailedException;
+use pocketmine\command\ConsoleCommandSender;
+use pocketmine\item\Item;
+use pocketmine\Player;
+use pocketmine\plugin\PluginBase;
+use pocketmine\command\CommandSender;
+use pocketmine\command\Command;
+use pocketmine\Server;
+use pocketmine\utils\Config;
+use SaltyPixelDevz\CustomShopUIv2\libs\jojoe77777\FormAPI\SimpleForm;
+use pocketmine\utils\TextFormat as TF;
+use SaltyPixelDevz\CustomShopUIv2\libs\jojoe77777\FormAPI\CustomForm;
+use SaltyPixelDevz\CustomShopUIv2\libs\JackMD\ConfigUpdater\ConfigUpdater;
+
+//   _____       _ _         _____ _          _ _____
+//  / ____|     | | |       |  __ (_)        | |  __ \
+// | (___   __ _| | |_ _   _| |__) |__  _____| | |  | | _____   ______
+//  \___ \ / _` | | __| | | |  ___/ \ \/ / _ \ | |  | |/ _ \ \ / /_  /
+//  ____) | (_| | | |_| |_| | |   | |>  <  __/ | |__| |  __/\ V / / /
+// |_____/ \__,_|_|\__|\__, |_|   |_/_/\_\___|_|_____/ \___| \_/ /___|
+//                      __/ |
+//                     |___/
+
+class Shop extends PluginBase
+{
+
+    public $msg;
+    // For Config Updates!
+    private const CONFIG_VERSION = 5;
+    // For shop Updates!
+    private const SHOP_VERSION = 4;
+    // For Message Updates!
+    private const MESSAGE_VERSION = 5;
+    public function onEnable(): void
+    {
+        $this->saveDefaultConfig();
+        $this->saveResource("messages.yml");
+        $this->saveResource("shop.yml");
+        $this->checkConfigs();
+    }
+    public function checkConfigs(): void
+    {
+        if ((!$this->getConfig()->exists("config-version")) || ($this->getConfig()->get("config-version") != self::CONFIG_VERSION)) {
+            rename($this->getDataFolder() . "config.yml", $this->getDataFolder() . "config_old.yml");
+            $this->saveResource("config.yml");
+            $this->getLogger()->critical("Your configuration file is outdated.");
+            $this->getLogger()->notice("Your old configuration has been saved as config_old.yml and a new configuration file has been generated. Please update accordingly.");
+        }
+        $dataConfig = new Config($this->getDataFolder() . "shop.yml", Config::YAML);
+        if ((!$dataConfig->exists("shop-version")) || ($dataConfig->get("shop-version") != self::SHOP_VERSION)) {
+            rename($this->getDataFolder() . "shop.yml", $this->getDataFolder() . "shop_old.yml");
+            $this->saveResource("shop.yml");
+            $this->getLogger()->critical("Your shop.yml file is outdated.");
+            $this->getLogger()->notice("Your old shop.yml has been saved as shop_old.yml and a new shop.yml file has been generated. Please update accordingly.");
+        }
+        $dataConfig = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+        if ((!$dataConfig->exists("message-version")) || ($dataConfig->get("message-version") != self::MESSAGE_VERSION)) {
+            rename($this->getDataFolder() . "messages.yml", $this->getDataFolder() . "messages_old.yml");
+            $this->saveResource("messages.yml");
+            $this->getLogger()->critical("Your messages.yml file is outdated.");
+            $this->getLogger()->notice("Your old messages.yml has been saved as messages_old.yml and a new messages.yml file has been generated. Please update accordingly.");
+        }
+
+    }
+    public function onCommand(CommandSender $sender, Command $command, string $label, array $args): bool
+    {
+        switch ("shop") {
+            case "shop":
+                if ($sender instanceof Player) {
+                    $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                    $cfg = yaml_parse_file($this->getDataFolder() . "shop.yml");
+                    $level = $sender->getLevel()->getName();
+                    $worlds = $this->getConfig()->get("Worlds");
+                        if(in_array($level, $worlds) === true){
+                            $sender->sendMessage($msg->getNested("Messages.BannedinWorld"));
+                        }else {
+                            if (empty($args)) {
+                                $ans = strtolower($this->getConfig()->get("Default-Shop"));
+                                $cfg = $cfg[$ans];
+                                if ($sender->getGamemode() != 0 and $this->getConfig()->get("Survival") === true) {
+                                    $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                                    $sender->sendMessage($msg->getNested("messages.Survival"));
+                                    return true;
+                                } else {
+                                    $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                                    $this->Category($cfg, $sender, $msg, $ans);
+                                    return true;
+                                }
+                            } else if (!empty($args) && $this->getConfig()->get("Multi-Shop") === true) {
+                                $ans = strtolower($args[0]);
+                                if (array_key_exists($ans, $cfg)) {
+                                    $cfg = $cfg[$ans];
+                                    if ($sender->hasPermission("shop.$ans")) {
+                                        if ($sender->getGamemode() != 0 and $this->getConfig()->get("Survival") === true) {
+                                            $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                                            $sender->sendMessage($msg->getNested("messages.Survival"));
+                                            return true;
+                                        } else {
+                                            $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                                            $this->Category($cfg, $sender, $msg, $ans);
+                                            return true;
+                                        }
+                                        break;
+                                    } else if (!$sender->hasPermission("shop.$ans")) {
+                                        $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                                        $sender->sendMessage($msg->getNested("Messages.NoPermission"));
+                                    }
+                                } else {
+                                    $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                                    $sender->sendMessage($msg->getNested("Messages.ShopError"));
+                                }
+                            }
+                        }
+                } else {
+                    $sender->sendMessage(TF::RED . "Please use this in-game.");
+                }
+                return true;
+        }
+    }
+    public function Category($cfg, Player $player, Config $msg, $ans): void
+    {
+        $form = new SimpleForm(function (Player $player, int $data = null) use ($cfg, $msg, $ans) : void {
+            $categorys = $data;
+            if (($categorys === null) && ($this->getConfig()->get("Thanks") === true)) {
+                $player->sendMessage($msg->getNested("Messages.Thanks2"));
+            } else if (($this->getConfig()->get("Thanks") === true) or ($categorys !== null)) {
+                if ($data == 0 && $this->getConfig()->get("Category_ExitButton") === true) {
+                    $player->sendMessage($msg->getNested("Messages.Thanks2"));
+                } else {
+                    if ($this->getConfig()->get("Category_ExitButton") === true) {
+                        $categorys = $data - 1;
+                        $this->Items($player, $categorys, $cfg, $ans);
+                    } else {
+                        $categorys = $data;
+                        $this->Items($player, $categorys, $cfg, $ans);
+                    }
+                }
+            }
+        });
+        if ($this->getConfig()->getNested("Titles.$ans" . "title") !== null) {
+            $form->setTitle($this->getConfig()->getNested("Titles.$ans" . "title"));
+        } else {
+            $form->setTitle($this->getConfig()->getNested("Titles.Default"));
+        }
+        if ($this->getConfig()->get("Category_ExitButton") === true) {
+            $form->addButton($msg->getNested("Messages.Category_ExitButton"));
+        }
+        foreach ($cfg as $cate => $category) {
+            if ($category == self::SHOP_VERSION) {
+            } else {
+                $list = explode(":", $category["Name"]);
+                if (substr($list[1], 0, 4) == "http") {
+                    $form->addButton($list[0], 1, $list[1] . ":" . $list[2]);
+                } else {
+                    $form->addButton($list[0], 0, $list[1]);
+                }
+            }
+        }
+        $player->sendForm($form);
+    }
+    public function Items(Player $player, $categorys, $cfg, $ans)
+    {
+        $form = new SimpleForm(function (Player $player, int $data = null) use ($cfg, $categorys, $ans) : void {
+            $items = $cfg[$categorys];
+            if (!isset($items["Sub"])) {
+                if ($data == 0 and $this->getConfig()->get("Items_ExitButton") === true) {
+                    $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                    $this->Category($cfg, $player, $msg, $ans);
+                } else {
+                    if ($this->getConfig()->get("Items_ExitButton") === true){
+                        $command = $data - 1;
+                    }else{
+                        $command = $data;
+                    }
+                    foreach ($items["Items"] as $cate => $item) {
+                        $list4[] = $item;
+                    }
+                    $list = explode(":", $list4[$command]);
+                    if ($list[0] == "cmd") {
+                        if ($this->getConfig()->get("command_confirm") === true) {
+                            $sub = 0;
+                            $this->Commandform($player, $cfg, $categorys, $command, $sub, $ans);
+                        } else {
+                            $sub = 0;
+                            $this->Command($player, $cfg, $categorys, $command, $sub, $ans);
+                        }
+                    } elseif (($list[0] != "cmd")) {
+                        $item = $command;
+                        $sub = 0;
+                        $this->Confirmation($player, $cfg, $categorys, $item, $ans, $sub);
+                    }
+                }
+            }else{
+                if ($this->getConfig()->get("Category_ExitButton") === true) {
+                    if ($data == 0){
+                        $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                        $this->Category($cfg, $player, $msg, $ans);
+                    }else {
+                        $ans = $data - 1;
+                        $this->SubItems($player, $categorys, $cfg, $ans);
+                    }
+                }else{
+                    $ans = $data;
+                    $this->SubItems($player, $categorys, $cfg, $ans);
+                }
+            }
+        });
+        $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+        $form->setTitle($msg->getNested("Titles.Items"));
+        if ($this->getConfig()->get("Items_ExitButton") === true) {
+            $form->addButton($msg->getNested("Messages.ExitButton"));
+        }
+            $items = $cfg[$categorys];
+            if (!isset($items["Sub"])) {
+                foreach ($items["Items"] as $cate => $item) {
+                    $list = explode(":", $item);
+                    if ($list[5] == "Default") {
+                        $name = Item::get((int)$list[0], (int)$list[1], 1)->getName();
+                    } else {
+                        $name = $list[5];
+                    }
+                    if ($list[0] == "cmd") {
+                        $msg2 = str_replace("{price}", "$list[2]", $msg->getNested("Messages.Each"));
+                        if (substr($list[5], 0, 4) == "http") {
+                            $form->addButton($list[1] . " " . $msg2, 1, $list[5] . ":" . $list[6]);
+                        } else {
+                            $form->addButton($list[1] . " " . $msg2, 0, $list[5]);
+                        }
+                    } else {
+                        $msg2 = str_replace("{price}", "$list[2]", $msg->getNested("Messages.Each"));
+                        if (substr($list[6], 0, 4) == "http") {
+                            $form->addButton($name . " " . $msg2, 1, $list[6] . ":" . $list[7]);
+                        } else {
+                            $form->addButton($name . " " . $msg2, 0, $list[6]);
+                        }
+                    }
+                }
+            } else {
+                $items2 = $items["Sub"];
+                foreach ($items2 as $cate => $item) {
+                    $list = explode(":", $item["Name"]);
+                    if (substr($list[1], 0, 4) == "http") {
+                        $form->addButton($list[0], 1, $list[1] . ":" . $list[2]);
+                    } else {
+                        $form->addButton($list[0], 0, $list[1]);
+                    }
+                }
+            }
+        $player->sendForm($form);
+    }
+    public function SubItems(Player $player, $categorys, $cfg, $ans)
+    {
+        $form = new SimpleForm(function (Player $player, int $data = null) use ($cfg, $categorys, $ans) : void {
+            if ($data == 0 and $this->getConfig()->get("Items_ExitButton") === true) {
+                $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                $this->Category($cfg, $player, $msg, $ans);
+            } else {
+                if ($this->getConfig()->get("Items_ExitButton") === true){
+                    $command = $data - 1;
+                }else{
+                    $command = $data;
+                }
+                $items = $cfg[$categorys];
+                $items2 = $items["Sub"];
+                $items3 = $items2[$ans];
+                foreach ($items3["Items"] as $cate => $item) {
+                    $list4[] = $item;
+                }
+                $list = explode(":", $list4[$command]);
+                if ($list[0] == "cmd") {
+                    if ($this->getConfig()->get("command_confirm") === true) {
+                        $sub = 1;
+                        $this->Commandform($player, $cfg, $categorys, $command, $sub, $ans);
+                    } else {
+                        $sub = 1;
+                        $this->Command($player, $cfg, $categorys, $command, $sub, $ans);
+                    }
+                } elseif (($list[0] != "cmd")) {
+                    $item = $command;
+                    $sub = 1;
+                    $this->Confirmation($player, $cfg, $categorys, $item, $ans, $sub);
+                }
+            }
+        });
+        $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+        if ($this->getConfig()->get("Items_ExitButton") === true) {
+            $form->addButton($msg->getNested("Messages.ExitButton"));
+        }
+            $items = $cfg[$categorys];
+            $items2 = $items["Sub"];
+            if ($ans !== null) {
+                $items3 = $items2[$ans];
+                foreach ($items3["Items"] as $cate => $item) {
+                    $list = explode(":", $item);
+                    if ($list[5] == "Default") {
+                        $name = Item::get((int)$list[0], (int)$list[1], 1)->getName();
+                    } else {
+                        $name = $list[5];
+                    }
+                    if ($list[0] == "cmd") {
+                        if (substr($list[5], 0, 4) == "http") {
+                            $form->addButton($list[1] . " " . $list[2] . $msg->getNested("Messages.Each"), 1, $list[5] . ":" . $list[6]);
+                        } else {
+                            $form->addButton($list[1] . " " . $list[2] . $msg->getNested("Messages.Each"), 0, $list[5]);
+                        }
+                    } else {
+                        $msg2 = str_replace("{price}", "$list[3]", $msg->getNested("Messages.Each"));
+                        if (substr($list[6], 0, 4) == "http") {
+                            $form->addButton($name . " " . $msg2, 1, $list[6] . ":" . $list[7]);
+                        } else {
+                            $form->addButton($name . " " . $msg2, 0, $list[6]);
+                        }
+                    }
+                }
+                $player->sendForm($form);
+            }else if ($ans === null and $this->getConfig()->get("Straight_Back") === false){
+                $this->Category($cfg, $player, $msg, $ans);
+            }else if ($ans === null and $this->getConfig()->get("Straight_Back") === true){
+                $player->sendMessage($msg->getNested("Messages.Thanks2"));
+            }
+        }
+    // For Items
+    public function commandform(Player $player, $cfg, $categorys, $command, $sub, $ans)
+    {
+        $form = new SimpleForm(function (Player $player, $data) use ($cfg, $categorys, $command, $sub, $ans) {
+            $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+            if ($data == 1) {
+                $player->sendMessage($msg->getNested("Messages.command_buy_cancel"));
+            }
+            if ($data == 0) {
+                $this->Command($player, $cfg, $categorys, $command, $sub, $ans);
+            }
+        });
+        $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+        $form->setContent($msg->getNested("Messages.cmd_confirm"));
+        $form->addButton($msg->getNested("Messages.yes"));
+        $form->addButton($msg->getNested("Messages.no"));
+        $player->sendForm($form);
+    }
+
+    // For Commands
+    public function Command(Player $player, $cfg, $categorys, $command, $sub, $ans)
+    {
+        if ($sub != 1) {
+            $items = $cfg[$categorys];
+            foreach ($items["Items"] as $cate => $item2) {
+                $item1[] = $item2;
+            }
+            $list = explode(":", $item1[$command]);
+        }else if ($sub = 1){
+            $items = $cfg[$categorys];
+            $items2 = $items["Sub"];
+            $items3 = $items2[$ans];
+            foreach ($items3["Items"] as $cate => $item2) {
+                $item1[] = $item2;
+            }
+            $list = explode(":", $item1[$command]);
+        }
+        if (EconomyAPI::getInstance()->myMoney($player) > $list[2]) {
+            if ($list[3] == "Console") {
+                $cmd = str_replace("{player}", $player->getName(), $list[4]);
+                Server::getInstance()->dispatchCommand(new ConsoleCommandSender(), $cmd);
+                EconomyAPI::getInstance()->reduceMoney($player->getName(), $list[2]);
+            } elseif ($list[3] == "Player") {
+                $cmd = str_replace("{player}", $player->getName(), $list[4]);
+                Server::getInstance()->dispatchCommand($player, $cmd);
+                EconomyAPI::getInstance()->reduceMoney($player->getName(), $list[2]);
+            }
+        } else {
+            $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+            $player->sendMessage($msg->getNested("Messages.Not_enough_money_command"));
+        }
+    }
+    // For Commands
+    // For Confirm Form (LONG BOI)
+    public function Confirmation(Player $player, $cfg, $categorys, $item, $ans, $sub)
+    {
+        $form = new CustomForm(function (Player $player, $data) use ($cfg, $categorys, $item, $ans, $sub) {
+            if ($data === null) {
+                $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                if (($this->getConfig()->get("Straight_Back") == true)) {
+                    $player->sendMessage($msg->getNested("Messages.Thanks2"));
+                } elseif ($this->getConfig()->get("Back_to_Start") == true) {
+                    $this->Category($cfg, $player, $msg, $ans);
+                }
+            } else {
+                $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+                $money = EconomyAPI::getInstance()->myMoney($player);
+                $items = $cfg[$categorys];
+                $message = $msg->getNested("Messages.Information");
+                if ($sub != 1) {
+                    foreach ($items["Items"] as $cate => $item2) {
+                        $item1[] = $item2;
+                    }
+                    $list = explode(":", $item1[$item]);
+                }else if ($sub = 1){
+                    $items = $cfg[$categorys];
+                    $items2 = $items["Sub"];
+                    $items3 = $items2[$ans];
+                    foreach ($items3["Items"] as $cate => $item2) {
+                        $item1[] = $item2;
+                    }
+                    $list = explode(":", $item1[$item]);
+                }
+                $name = Item::get((int)$list[0], (int)$list[1], 1)->getName();
+                $vars = ["{item}" => $name, "{cost}" => $list[4]];
+                foreach ($vars as $var => $replacement) {
+                    $message = str_replace($var, $replacement, $message);
+                }
+                if ($this->getConfig()->getNested("Types.Toggle") == true) {
+                    if ($this->getConfig()->getNested("Types.Input") == true) {
+                        $data1 = (int)$data[2];
+                    }
+                    if ($this->getConfig()->getNested("Types.Slider") == true) {
+                        $data1 = $data[3];
+                    }
+                    if ($this->getConfig()->getNested("Types.StepSlider") == true) {
+                        $numbers = $this->getConfig()->getNested("Slider_Numbers");
+                        $data1 = $numbers[$data[4]];
+                    }
+                }
+
+                if (($this->getConfig()->get("Thanks")) === true) {
+                    if ($data1 === null) {
+                        $player->sendMessage($msg->getNested("Messages.Thanks2"));
+                    } else {
+                        $player->sendMessage($msg->getNested("Messages.Thanks"));
+                    }
+                } else {
+                    if ($data[1] == false) {
+                        if ($money >= $list[3] * $data1) {
+                            $item = $player->getInventory();
+                            if ($list[5] != "Default") {
+                                $item->addItem(Item::get((int)$list[0], (int)$list[1], $data1)->setCustomName($list[5]));
+                            } elseif ($list[5] == "Default") {
+                                $item->addItem(Item::get((int)$list[0], (int)$list[1], $data1));
+                            }
+                            EconomyAPI::getInstance()->reduceMoney($player, $list[3] * $data1);
+                            $message = $msg->getNested("Messages.Paid_for");
+                            $vars = ["{amount}" => $data1, "{item}" => $name, "{cost}" => $list[3] * $data1];
+                            foreach ($vars as $var => $replacement) {
+                                $message = str_replace($var, $replacement, $message);
+                            }
+                            $player->sendMessage($message);
+                        } else {
+                            $message = $msg->getNested("Messages.Not_enough_money");
+                            $tags = ["{amount}" => $data1, "{item}" => $name, "{cost}" => $list[3] * $data1, "{missing}" => $list[3] * $data1 - $money];
+                            foreach ($tags as $tag => $replacement) {
+                                $message = str_replace($tag, $replacement, $message);
+                            }
+                            $player->sendMessage($message);
+                        }
+                    }
+
+
+                    if ($data[1] == true) {
+                        if ($player->getInventory()->contains(Item::get((int)$list[0], (int)$list[1], $data1)) === true) {
+                            $player->getInventory()->removeItem(Item::get((int)$list[0], (int)$list[1], $data1));
+                            EconomyAPI::getInstance()->addMoney($player, $list[4] * $data1);
+                            $message = $msg->getNested("Messages.Paid");
+                            $vars = ["{amount}" => $data1, "{item}" => $name, "{pay}" => $list[4] * $data1];
+                            foreach ($vars as $var => $replacement) {
+                                $message = str_replace($var, $replacement, $message);
+                            }
+                            $player->sendMessage($message);
+                        } else {
+                            $message = $msg->getNested("Messages.Not_enough_items");
+                            $tags = ["{amount}" => $data1, "{item}" => $name, "{pay}" => $list[4] * $data1];
+                            foreach ($tags as $tag => $replacement) {
+                                $message = str_replace($tag, $replacement, $message);
+                            }
+                            $player->sendMessage($message);
+                        }
+                    }
+                }
+            }
+        });
+
+        $msg = new Config($this->getDataFolder() . "messages.yml", Config::YAML);
+        if ($item !== null) {
+            $items = $cfg[$categorys];
+            $message = $msg->getNested("Messages.Information");
+            if ($sub != 1) {
+                foreach ($items["Items"] as $cate => $item2) {
+                    $item1[] = $item2;
+                }
+                $list = explode(":", $item1[$item]);
+            } else if ($sub = 1) {
+                $items = $cfg[$categorys];
+                $items2 = $items["Sub"];
+                $items3 = $items2[$ans];
+                foreach ($items3["Items"] as $cate => $item2) {
+                    $item1[] = $item2;
+                }
+                $list = explode(":", $item1[$item]);
+            }
+            $name = Item::get((int)$list[0], (int)$list[1], 1)->getName();
+            $vars = ["{item}" => $name, "{cost}" => $list[3], "{sell}" => $list[4]];
+            foreach ($vars as $var => $replacement) {
+                $message = str_replace($var, $replacement, $message);
+            }
+            $form->setTitle($msg->getNested("Titles.Amount"));
+            $form->addLabel($message);
+            if ($this->getConfig()->getNested("Types.Toggle") == true) {
+                $message2 = $msg->getNested("Messages.BuySell");
+                $vars2 = ["{item}" => $name, "{cost}" => $list[3], "{sell}" => $list[4]];
+                foreach ($vars2 as $var => $replacement) {
+                    $message2 = str_replace($var, $replacement, $message2);
+                }
+                $form->addToggle($message2);
+            }
+            if ($this->getConfig()->getNested("Types.Input") == true) {
+                $form->addInput($msg->getNested("Messages.Input"));
+            }
+            if ($this->getConfig()->getNested("Types.Slider") == true) {
+                $form->addSlider("Amount", $this->getConfig()->getNested("Types.Slider_Minimum"), $this->getConfig()->getNested("Types.Slider_Maximum"));
+            }
+            if ($this->getConfig()->getNested("Types.StepSlider") == true) {
+                $form->addStepSlider("Amount", $this->getConfig()->getNested("Types.Slider_Numbers"));
+            }
+            $player->sendForm($form);
+        }else{
+            $player->sendMessage($msg->getNested("Messages.Thanks2"));
+        }
+    }
+    // For Confirm Form (LONG BOI)
+
+//    _____       _ _         _____ _          _ _____
+//   / ____|     | | |       |  __ (_)        | |  __ \
+//  | (___   __ _| | |_ _   _| |__) |__  _____| | |  | | _____   ______
+//   \___ \ / _` | | __| | | |  ___/ \ \/ / _ \ | |  | |/ _ \ \ / /_  /
+//   ____) | (_| | | |_| |_| | |   | |>  <  __/ | |__| |  __/\ V / / /
+//  |_____/ \__,_|_|\__|\__, |_|   |_/_/\_\___|_|_____/ \___| \_/ /___|
+//                       __/ |
+//                      |___/
+
+
+}
+message-version: 5
+Titles:
+  Items: "Items" # Title on the Items Section                    (All of these three things can have colors using the "§" Symbol!)
+  Amount: "Amount" # Title on the Buying area with Sliders and Things!
+
+
+Messages:
+  Survival: "You must Be in Survival Mode to use the Shop!" # Message for when player is in creative and shop is set to survival only
+  ExitButton: "§c§lBACK" # Button for Item Category
+  Category_ExitButton: "§c§lEXIT" # Button for Exiting Plugin!
+  Input: "Amount" # The Words above the Input Amount!
+  # You can use {price here now!}
+  Each: "$ {price} Each" # Signs for the Buttons like Steak 4($ Each) that is the part it changes
+
+  # You can add {sell} here For Showing the Sell Price of the Item.
+  BuySell: "Buy/Sell for {sell}$ Each" # The words next to the Toggle Switch
+
+  # You can Also add {sell} to here if you prefer it in the message up top.
+  Information: "How Many of {item} for {cost}$ Each \nWould you Like to Buy?"
+  ## You can use {amount}, {item} and {cost} here.
+  Paid_for: "You Bought {amount}x {item} for {cost}."
+  ## You can use {amount}, {item}, {cost}, and {missing} here.
+  Not_enough_money: "You Tried to By {amount} of {item} for {cost} but were missing {missing}."
+  Not_enough_money_command: "You don't have enough money to buy that Command!"
+  Paid: "You Sold {amount} of {item} for {pay}."
+  Not_enough_items: "You tried to sell {amount} of {item} for {pay} but didn't have enough Items!"
+  Thanks: "Thank you for Using the Shop!" # Message sent on Item Buy!
+  Thanks2: "Thank you for visiting the Shop!" #Message sent on Shop Close!
+  cmd_confirm: "Are you sure you want to Buy this Command?"
+  yes: "§a§lYes"
+  no: "§4§lNo"
+  command_buy_cancel: "You canceled the Transaction!"
+  NoPermission: "§cError: §7You don't have Permission to Use that Shop!"
+  ShopError: "§cError: §7That Shop Does Not exist!"
+  BannedinWorld: "§cError: §7That Command Has Been banned in this World"## DO NOT TOUCH (This is for Updates only!)
+shop-version: 4
+# DO NOT TOUCH ^^^^^
+
+#Command Example!!!
+#======================================================================================================
+# Commands:
+#
+#
+#    - "cmd:Sharpness III:100:Console:enchant {player} protection 3:textures/items/stone_sword"
+#            NAME^^^ Price^^^ TYPE^^^            COMMAND^^^^^             PICTURE^^^^^^^
+#
+# Items:
+#
+#   - "268:0:1:250:0:Default:textures/items/wood_sword"
+#
+#   - "ID:META:NUMBER:PRICE(PER ITEM THEY BUY):SELL(PER ITEM THEY SELL):NAME(Defalut OR Custom with §):Picture"
+#
+######## IMPORTANT #########
+#
+#  Next Update Finishes Enchants (Can be Done with Commands!)
+#
+#  NEW!!! We have a Minecraft Texture Library on our Website!
+#         Go to: http://saltypixel.gs/textures after that add the item like this:
+#                   http://saltypixel.ga/textures/blocks/tnt_side.png (You can Send us .png files and we will add them!)
+#                          That would Look like this in use!
+#
+#   - "268:0:1:250:0:Default:http://saltypixel.ha/textures/blocks/tnt_side.png"
+#
+#
+# Developer: AlexPads Team: SaltyPixelDevz! (hub.saltypixel.ga 19132) Join!
+# NEW!!!!!!!!!! SubCategories!
+#======================================================================================================
+
+# MUST be all Lowercase! RECOMMENDED TO KEEP THIS YOUR DEFAULT SHOP!
+shop: # if you want the shop to have a custom name you must add the options in the Config.yml file if now it will default to ShopUI
+  0: #must start at 0 and go up by one with every new category you make.
+    Name: "Weapons / Tools:textures/items/stone_sword" #Can use Custom Colors in the Names using the "§" Symbol
+    Sub:
+      0:
+        Name: "Swords:textures/items/stone_sword"
+        Items:
+          - "268:0:1:250:0:Default:textures/items/wood_sword"
+          - "272:0:1:500:0:Default:textures/items/stone_sword"
+          - "267:0:1:2000:0:Default:textures/items/iron_sword"
+          - "276:0:1:3500:0:Default:textures/items/diamond_sword"
+          - "cmd:Sharpness III:100:Console:enchant {player} protection 3:textures/items/stone_sword"
+      1:
+        Name: "Bows:textures/items/bow_pulling_2"
+        Items:
+          - "261:0:1:500:0:Default:textures/items/bow_pulling_2"
+          - "262:0:1:2:0:Default:textures/items/arrow"
+      2:
+        Name: "Picks:textures/items/diamond_pickaxe"
+        Items:
+          - "278:0:1:2500:0:Default:textures/items/diamond_pickaxe"
+          - "285:0:1:2000:0:Default:textures/items/gold_pickaxe"
+          - "257:0:1:1000:0:Default:textures/items/iron_pickaxe"
+          - "274:0:1:550:0:Default:textures/items/stone_pickaxe"
+          - "270:0:1:100:0:Default:textures/items/wood_pickaxe"
+      3:
+        Name: "Axes:textures/items/diamond_axe"
+        Items:
+          - "271:0:1:200:0:Default:textures/items/wood_axe"
+          - "275:0:1:200:0:Default:textures/items/stone_axe"
+          - "258:0:1:200:0:Default:textures/items/iron_axe"
+          - "279:0:1:200:0:Default:textures/items/diamond_axe"
+  1:
+    Name: "Armor:textures/items/diamond_chestplate"
+    Sub:
+      0:
+        Name: "Leather:textures/items/leather_chestplate"
+        Items:
+          - "298:0:1:10000:0:Default:textures/items/leather_helmet"
+          - "299:0:1:10000:0:Default:textures/items/leather_chestplate"
+          - "300:0:1:10000:0:Default:textures/items/leather_leggings"
+          - "301:0:1:10000:0:Default:textures/items/leather_boots"
+      1:
+        Name: "ChainMail:textures/items/chainmail_chestplate"
+        Items:
+          - "302:0:1:15000:0:Default:textures/items/chainmail_helmet"
+          - "303:0:1:15000:0:Default:textures/items/chainmail_chestplate"
+          - "304:0:1:15000:0:Default:textures/items/chainmail_leggings"
+          - "305:0:1:15000:0:Default:textures/items/chainmail_boots"
+      2:
+        Name: "Iron:textures/items/iron_chestplate"
+        Items:
+          - "306:0:1:17000:0:Default:textures/items/iron_helmet"
+          - "307:0:1:17000:0:Default:textures/items/iron_chestplate"
+          - "308:0:1:17000:0:Default:textures/items/iron_leggings"
+          - "309:0:1:17000:0:Default:textures/items/iron_boots"
+      3:
+        Name: "Gold:textures/items/gold_chestplate"
+        Items:
+          - "314:0:1:12000:0:Default:textures/items/gold_helmet"
+          - "315:0:1:12000:0:Default:textures/items/gold_chestplate"
+          - "316:0:1:12000:0:Default:textures/items/gold_leggings"
+          - "317:0:1:12000:0:Default:textures/items/gold_boots"
+      4:
+        Name: "Diamond:textures/items/diamond_chestplate"
+        Items:
+          - "310:0:1:25000:0:Default:textures/items/diamond_helmet"
+          - "311:0:1:25000:0:Default:textures/items/diamond_chestplate"
+          - "312:0:1:25000:0:Default:textures/items/diamond_leggings"
+          - "313:0:1:25000:0:Default:textures/items/diamond_boots"
+  2:
+    Name: "Blocks:textures/blocks/dirt"
+    Sub:
+      0:
+        Name: "Building:textures/blocks/cobblestone"
+        Items:
+          - "4:0:64:50:2:Default:textures/blocks/cobblestone"
+          - "3:0:64:50:1:Default:textures/blocks/dirt"
+          - "1:0:64:12:.5:Default:textures/blocks/stone"
+          - "17:0:64:12:2:Default:textures/blocks/log_oak"
+          - "20:0:64:25:2:Default:textures/blocks/glass"
+          - "24:0:64:15:2:Default:textures/blocks/sandstone_normal"
+          - "98:0:64:15:2:Default:textures/blocks/stonebrick"
+          - "155:0:64:15:2:Default:textures/blocks/quartz_block_side"
+          - "88:0:64:20:0.5:Default:textures/blocks/snow"
+          - "44:0:64:25:3:Default:textures/blocks/stone_slab_side"
+          - "47:0:64:15:2:Default:textures/blocks/bookshelf"
+          - "45:0:64:15:2:Default:textures/blocks/brick"
+          - "87:0:64:15:1:Default:textures/blocks/nether_brick"
+          - "49:0:64:25:3:Default:textures/blocks/obsidian"
+      1:
+        Name: "Decor:http://saltypixel.ga/textures/items/white_wool.png"
+        Items:
+          - "35:0:64:25:1.75:White Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:1:64:25:1.75:Orange Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:2:64:25:1.75:Magenta Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:3:64:25:1.75:Light Blue Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:4:64:25:1.75:Yellow Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:5:64:25:1.75:Lime Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:6:64:25:1.75:Pink Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:7:64:25:1.75:Gray Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:8:64:25:1.75:Light Gray Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:9:64:25:1.75:Cyan Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:10:64:25:1.75:Purple Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:11:64:25:1.75:Blue Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:12:64:l:1.5:Brown Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:13:64:25:1.75:Green Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:14:64:25:1.75:Red Wool:https://saltypixel.ga/textures/items/white_wool.png"
+          - "35:15:64:25:1.75:Black Wool:https://saltypixel.ga/textures/items/white_wool.png"
+  3:
+    Name: "Food & Special:textures/items/apple"
+    Items:
+      - "466:0:1:50000:0:Default:http://saltypixel.ga/textures/items/enchanted_golden_apple.png"
+      - "322:0:1:15000:0:Default:textures/items/apple_golden"
+      - "396:0:1:10000:0:Default:textures/items/carrot_golden"
+      - "364:0:16:5:0:Default:textures/items/beef_cooked"
+      - "320:0:16:6:0:Default:textures/items/porkchop_cooked"
+      - "424:0:16:5:1:Default:textures/items/mutton_cooked"
+  4:
+    Name: "Farming:textures/items/stone_hoe"
+    Items:
+      - "291:0:1:100:1:Default:textures/items/stone_hoe"
+      - "351:15:32:20:1.75:Default:/textures/items/ink_sac"
+      - "296:0:12:10:2.50:Default:textures/items/seeds_wheat"
+      - "338:0:32:10:2:Default:textures/items/sugar"
+      - "362:0:32:10:1.50:Default:textures/items/seeds_melon"
+      - "361:0:32:10:2:Default:textures/items/seeds_pumpkin"
+      - "391:0:32:5:1:Default:textures/items/carrot"
+      - "392:0:32:5:1:Default:textures/items/potato"
+  5:
+    Name: "Raiding & Misc:textures/items/bucket_lava"
+    Items:
+      - "50:0:16:10:2.5:Default:textures/blocks/torch_on"
+      - "46:0:16:500:1.5:Default:textures/blocks/tnt_side"
+      - "325:10:1:5000:5:Default:textures/items/bucket_lava"
+      - "325:8:1:5000:5:Default:textures/items/bucket_water"
+      - "218:0:1:5000:1:Default:textures/items/shulker_shell"
+  6:
+    Name: "Ores:textures/items/diamond"
+    Items:
+      - "264:0:12:80:2.5:Default:textures/items/diamond"
+      - "265:0:10:50:2.5:Default:textures/items/iron_ingot"
+      - "266:0:10:50:2.5:Default:textures/items/gold_ingot"
+      - "388:0:10:100:2.5:Default:textures/items/emerald"
+      - "263:0:10:25:1.75:Default:textures/items/coal"
+      - "351:4:10:1000:1.5:Default:textures/items/lapis_lazuli"
+      - "331:0:10:25:3:Default:textures/items/redstone"
+  7:
+    Name: "Spawners:textures/blocks/mob_spawner"
+    Items:
+      - "52:0:1:100000:50000:Default:textures/blocks/mob_spawner"
+      - "383:33:1:15000:5000:Default:textures/items/spawn_egg"
+      - "383:34:1:20000:8000:Default:textures/items/spawn_egg"
+      - "383:35:1:15000:6000:Default:textures/items/spawn_egg"
+      - "383:43:1:23000:10000:Default:textures/items/spawn_egg"
+      - "369:0:64:50:3.5:Default:textures/items/blaze_rod"
+      - "352:0:64:50:2.75:Default:textures/items/bone"
+      - "262:0:64:50:1.75:Default:textures/items/arrow"
+vip: # if you want the shop to have a custom name you must add the options in the Config.yml file if now it will default to ShopUI
+  0: #must start at 0 and go up by one with every new category you make.
+    Name: "Vip Weapons / Tools:textures/items/stone_sword" #Can use Custom Colors in the Names using the "§" Symbol
+    Sub:
+      0:
+        Name: "Swords:textures/items/stone_sword"
+        Items:
+          - "268:0:1:250:0:Default:textures/items/wood_sword"
+          - "272:0:1:500:0:Default:textures/items/stone_sword"
+          - "267:0:1:2000:0:Default:textures/items/iron_sword"
+          - "276:0:1:3500:0:Default:textures/items/diamond_sword"
+      1:
+        Name: "Bows:textures/items/bow_pulling_2"
+        Items:
+          - "261:0:1:500:0:Default:textures/items/bow_pulling_2"
+          - "262:0:1:2:0:Default:textures/items/arrow"
+      2:
+        Name: "Picks:textures/items/diamond_pickaxe"
+        Items:
+          - "278:0:1:2500:0:Default:textures/items/diamond_pickaxe"
+          - "285:0:1:2000:0:Default:textures/items/gold_pickaxe"
+          - "257:0:1:1000:0:Default:textures/items/iron_pickaxe"
+          - "274:0:1:550:0:Default:textures/items/stone_pickaxe"
+          - "270:0:1:100:0:Default:textures/items/wood_pickaxe"
+      3:
+        Name: "Axes:textures/items/diamond_axe"
+        Items:
+          - "271:0:1:200:0:Default:textures/items/wood_axe"
+          - "275:0:1:200:0:Default:textures/items/stone_axe"
+          - "258:0:1:200:0:Default:textures/items/iron_axe"
+          - "279:0:1:200:0:Default:textures/items/diamond_axe"
+  1:
+    Name: "Vip Armor:textures/items/diamond_chestplate"
+    Sub:
+      0:
+        Name: "Leather:textures/items/leather_chestplate"
+        Items:
+          - "298:0:1:10000:0:Default:textures/items/leather_helmet"
+          - "299:0:1:10000:0:Default:textures/items/leather_chestplate"
+          - "300:0:1:10000:0:Default:textures/items/leather_leggings"
+          - "301:0:1:10000:0:Default:textures/items/leather_boots"
+      1:
+        Name: "ChainMail:textures/items/chainmail_chestplate"
+        Items:
+          - "302:0:1:15000:0:Default:textures/items/chainmail_helmet"
+          - "303:0:1:15000:0:Default:textures/items/chainmail_chestplate"
+          - "304:0:1:15000:0:Default:textures/items/chainmail_leggings"
+          - "305:0:1:15000:0:Default:textures/items/chainmail_boots"
+      2:
+        Name: "Iron:textures/items/iron_chestplate"
+        Items:
+          - "306:0:1:17000:0:Default:textures/items/iron_helmet"
+          - "307:0:1:17000:0:Default:textures/items/iron_chestplate"
+          - "308:0:1:17000:0:Default:textures/items/iron_leggings"
+          - "309:0:1:17000:0:Default:textures/items/iron_boots"
+      3:
+        Name: "Gold:textures/items/gold_chestplate"
+        Items:
+          - "314:0:1:12000:0:Default:textures/items/gold_helmet"
+          - "315:0:1:12000:0:Default:textures/items/gold_chestplate"
+          - "316:0:1:12000:0:Default:textures/items/gold_leggings"
+          - "317:0:1:12000:0:Default:textures/items/gold_boots"
+      4:
+        Name: "Diamond:textures/items/diamond_chestplate"
+        Items:
+          - "310:0:1:25000:0:Default:textures/items/diamond_helmet"
+          - "311:0:1:25000:0:Default:textures/items/diamond_chestplate"
+          - "312:0:1:25000:0:Default:textures/items/diamond_leggings"
+          - "313:0:1:25000:0:Default:textures/items/diamond_boots"
+  2:
+    Name: "Vip Blocks:textures/blocks/dirt"
+    Items:
+      - "4:0:64:50:2:Default:textures/blocks/cobblestone"
+      - "3:0:64:50:1:Default:textures/blocks/dirt"
+      - "1:0:64:12:.5:Default:textures/blocks/stone"
+      - "17:0:64:12:2:Default:textures/blocks/log_oak"
+      - "20:0:64:25:2:Default:textures/blocks/glass"
+      - "24:0:64:15:2:Default:textures/blocks/sandstone_normal"
+      - "98:0:64:15:2:Default:textures/blocks/stonebrick"
+      - "155:0:64:15:2:Default:textures/blocks/quartz_block_side"
+      - "88:0:64:20:0.5:Default:textures/blocks/snow"
+      - "44:0:64:25:3:Default:textures/blocks/stone_slab_side"
+      - "47:0:64:15:2:Default:textures/blocks/bookshelf"
+      - "45:0:64:15:2:Default:textures/blocks/brick"
+      - "87:0:64:15:1:Default:textures/blocks/nether_brick"
+      - "49:0:64:25:3:Default:textures/blocks/obsidian"
+  3:
+    Name: "Vip Food & Special:textures/items/apple"
+    Items:
+      - "466:0:1:50000:0:Default:http://saltypixel.ga/textures/items/enchanted_golden_apple.png"
+      - "322:0:1:15000:0:Default:textures/items/apple_golden"
+      - "396:0:1:10000:0:Default:textures/items/carrot_golden"
+      - "364:0:16:5:0:Default:textures/items/beef_cooked"
+      - "320:0:16:6:0:Default:textures/items/porkchop_cooked"
+      - "424:0:16:5:1:Default:textures/items/mutton_cooked"
+  4:
+    Name: "Vip Farming:textures/items/stone_hoe"
+    Items:
+      - "291:0:1:100:1:Default:textures/items/stone_hoe"
+      - "351:15:32:20:1.75:Default:/textures/items/inc_sac"
+      - "296:0:12:10:2.50:Default:textures/items/seeds_wheat"
+      - "338:0:32:10:2:Default:textures/items/sugar_cane"
+      - "362:0:32:10:1.50:Default:textures/items/seeds_melon"
+      - "361:0:32:10:2:Default:textures/items/seeds_pumpkin"
+      - "391:0:32:5:1:Default:textures/items/carrot"
+      - "392:0:32:5:1:Default:textures/items/potato"
+  5:
+    Name: "Vip Raiding & Misc:textures/items/bucket_lava"
+    Items:
+      - "50:0:16:10:2.5:Default:textures/blocks/torch_on"
+      - "46:0:16:500:1.5:Default:textures/blocks/tnt_side"
+      - "325:10:1:5000:5:Default:textures/items/bucket_lava"
+      - "325:8:1:5000:5:Default:textures/items/bucket_water"
+      - "218:0:1:5000:1:Default:textures/items/shulker_shell"
+  6:
+    Name: "Vip Ores:textures/items/diamond"
+    Items:
+      - "264:0:12:80:2.5:Default:textures/items/diamond"
+      - "265:0:10:50:2.5:Default:textures/items/iron_ingot"
+      - "266:0:10:50:2.5:Default:textures/items/gold_ingot"
+      - "388:0:10:100:2.5:Default:textures/items/emerald"
+      - "263:0:10:25:1.75:Default:textures/items/coal"
+      - "351:4:10:1000:1.5:Default:textures/items/lapis_lazuli"
+      - "331:0:10:25:3:Default:textures/items/redstone"
+  7:
+    Name: "Vip Spawners:http://saltypixel.ga/textures/items/spawner.png"
+    Items:
+      - "52:0:1:100000:50000:Default:textures/blocks/mob_spawner"
+      - "383:33:1:15000:5000:Default:textures/items/spawn_egg"
+      - "383:34:1:20000:8000:Default:textures/items/spawn_egg"
+      - "383:35:1:15000:6000:Default:textures/items/spawn_egg"
+      - "383:43:1:23000:10000:Default:textures/items/spawn_egg"
+      - "369:0:64:50:3.5:Default:textures/items/blaze_rod"
+      - "352:0:64:50:2.75:Default:textures/items/bone"
+      - "262:0:64:50:1.75:Default:textures/items/arrow"
+  8:
+    Name: "Vip Decor:http://saltypixel.ga/textures/items/white_wool.png"
+    Items:
+      - "35:0:64:25:1.75:White Wool:https://saltypixel.ga/textures/items/white_wool.png"
+      - "35:1:64:25:1.75:Orange Wool:https://saltypixel.ga/textures/items/White_wool.png"
+      - "35:2:64:25:1.75:Magenta Wool:https://saltypixel.ga/textures/items/White_wool.png"
+      - "35:3:64:25:1.75:Light Blue Wool:https://saltypixel.ga/textures/items/white_Wool.png"
+      - "35:4:64:25:1.75:Yellow Wool:https://saltypixel.ga/textures/items/White_wool.png"
+      - "35:5:64:25:1.75:Lime Wool:https://saltypixel.ga/textures/items/White_wool.png"
+      - "35:6:64:25:1.75:Pink Wool:https://saltypixel.ga/textures/items/White_wool.png"
+      - "35:7:64:25:1.75:Gray Wool:https://saltypixel.ga/textures/items/White_wool.png"
+      - "35:8:64:25:1.75:Light Gray Wool:https://saltypixel.ga/textures/items/white_wool.png"
+      - "35:9:64:25:1.75:Cyan Wool:https://saltypixel.ga/textures/items/White_wool.png"
+      - "35:10:64:25:1.75:Purple Wool:https://saltypixel.ga/textures/items/white_wool.png"
+      - "35:11:64:25:1.75:Blue Wool:https://saltypixel.ga/textures/items/white_wool.png"
+      - "35:12:64:l:1.5:Brown Wool:https://saltypixel.ga/textures/items/white_wool.png"
+      - "35:13:64:25:1.75:Green Wool:https://saltypixel.ga/textures/items/white_wool.png"
+      - "35:14:64:25:1.75:Red Wool:https://saltypixel.ga/textures/items/white_wool.png"
+      - "35:15:64:25:1.75:Black Wool:https://saltypixel.ga/textures/items/white_wool.png"

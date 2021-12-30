@@ -1,0 +1,11 @@
+name: EnchantUI
+main: UnknownOre\EnchantUI\Main
+version: 0.6
+api: 3.0.0
+load: POSTWORLD
+author: UnknownOre
+translator: WolfTubeTM
+permissions:
+  eshop.command:
+    default: true
+    description: "Cho phép sử dụng EnchantUI"

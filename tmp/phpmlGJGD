@@ -1,0 +1,5019 @@
+<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock;
+
+use pocketmine\item\Item;
+use pocketmine\level\Position;
+use pocketmine\plugin\PluginBase;
+use pocketmine\Server;
+use pocketmine\utils\TextFormat;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\generator\IsleGeneratorManager;
+use room17\SkyBlock\isle\IsleManager;
+use room17\SkyBlock\provider\json\JSONProvider;
+use room17\SkyBlock\provider\Provider;
+use room17\SkyBlock\session\SessionManager;
+
+class SkyBlock extends PluginBase {
+
+    /** @var SkyBlock */
+    private static $object = null;
+
+    /** @var SkyBlockSettings */
+    private $settings;
+    
+    /** @var Provider */
+    private $provider;
+    
+    /** @var SessionManager */
+    private $sessionManager;
+    
+    /** @var IsleManager */
+    private $isleManager;
+    
+    /** @var IsleCommandMap */
+    private $commandMap;
+    
+    /** @var IsleGeneratorManager */
+    private $generatorManager;
+    
+    /** @var SkyBlockListener */
+    private $eventListener;
+    
+    public function onLoad(): void {
+        self::$object = $this;
+        if(!is_dir($this->getDataFolder())) {
+            mkdir($this->getDataFolder());
+        }
+        $this->saveResource("messages.json");
+        $this->saveResource("settings.json");
+    }
+
+    public function onEnable(): void {
+        $this->settings = new SkyBlockSettings($this);
+        $this->provider = new JSONProvider($this);
+        $this->sessionManager = new SessionManager($this);
+        $this->isleManager = new IsleManager($this);
+        $this->generatorManager = new IsleGeneratorManager($this);
+        $this->commandMap = new IsleCommandMap($this);
+        $this->eventListener = new SkyBlockListener($this);
+        if($this->getServer()->getSpawnRadius() > 0) {
+            $this->getLogger()->warning("Please, disable the spawn protection on your server.properties, otherwise SkyBlock won't work correctly");
+        }
+        $this->getLogger()->info("SkyBlock was enabled");
+    }
+
+    public function onDisable(): void {
+        foreach($this->isleManager->getIsles() as $isle) {
+            $isle->save();
+        }
+        $this->getLogger()->info("SkyBlock was disabled");
+    }
+
+    /**
+     * @return SkyBlock
+     */
+    public static function getInstance(): SkyBlock {
+        return self::$object;
+    }
+    
+    /**
+     * @return SkyBlockSettings
+     */
+    public function getSettings(): SkyBlockSettings {
+        return $this->settings;
+    }
+    
+    /**
+     * @return Provider
+     */
+    public function getProvider(): Provider {
+        return $this->provider;
+    }
+    
+    /**
+     * @return SessionManager
+     */
+    public function getSessionManager(): SessionManager {
+        return $this->sessionManager;
+    }
+    
+    /**
+     * @return IsleManager
+     */
+    public function getIsleManager(): IsleManager {
+        return $this->isleManager;
+    }
+
+    /**
+     * @return IsleGeneratorManager
+     */
+    public function getGeneratorManager(): IsleGeneratorManager {
+        return $this->generatorManager;
+    }
+    
+    /**
+     * @param Position $position
+     * @return string
+     */
+    public static function writePosition(Position $position): string {
+        return "{$position->getLevel()->getName()},{$position->getX()},{$position->getY()},{$position->getZ()}";
+    }
+    
+    /**
+     * @param string $position
+     * @return null|Position
+     */
+    public static function parsePosition(string $position): ?Position {
+        $array = explode(",", $position);
+        if(isset($array[3])) {
+            $level = Server::getInstance()->getLevelByName($array[0]);
+            if($level != null) {
+                return new Position((float) $array[1],(float) $array[2],(float) $array[3], $level);
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * Parse an Item
+     *
+     * @param string $item
+     * @return null|Item
+     */
+    public static function parseItem(string $item): ?Item {
+        $parts = explode(",", $item);
+        foreach($parts as $key => $value) {
+            $parts[$key] = (int) $value;
+        }
+        if(isset($parts[0])) {
+            return Item::get($parts[0], $parts[1] ?? 0, $parts[2] ?? 1);
+        }
+        return null;
+    }
+    
+    /**
+     * @param array $items
+     * @return array
+     */
+    public static function parseItems(array $items): array {
+        $result = [];
+        foreach($items as $item) {
+            $item = self::parseItem($item);
+            if($item != null) {
+                $result[] = $item;
+            }
+        }
+        return $result;
+    }
+    
+    /**
+     * @param string $message
+     * @return string
+     */
+    public static function translateColors(string $message): string {
+        $message = str_replace("&", TextFormat::ESCAPE, $message);
+        $message = str_replace("{BLACK}", TextFormat::BLACK, $message);
+        $message = str_replace("{DARK_BLUE}", TextFormat::DARK_BLUE, $message);
+        $message = str_replace("{DARK_GREEN}", TextFormat::DARK_GREEN, $message);
+        $message = str_replace("{DARK_AQUA}", TextFormat::DARK_AQUA, $message);
+        $message = str_replace("{DARK_RED}", TextFormat::DARK_RED, $message);
+        $message = str_replace("{DARK_PURPLE}", TextFormat::DARK_PURPLE, $message);
+        $message = str_replace("{ORANGE}", TextFormat::GOLD, $message);
+        $message = str_replace("{GRAY}", TextFormat::GRAY, $message);
+        $message = str_replace("{DARK_GRAY}", TextFormat::DARK_GRAY, $message);
+        $message = str_replace("{BLUE}", TextFormat::BLUE, $message);
+        $message = str_replace("{GREEN}", TextFormat::GREEN, $message);
+        $message = str_replace("{AQUA}", TextFormat::AQUA, $message);
+        $message = str_replace("{RED}", TextFormat::RED, $message);
+        $message = str_replace("{LIGHT_PURPLE}", TextFormat::LIGHT_PURPLE, $message);
+        $message = str_replace("{YELLOW}", TextFormat::YELLOW, $message);
+        $message = str_replace("{WHITE}", TextFormat::WHITE, $message);
+        $message = str_replace("{OBFUSCATED}", TextFormat::OBFUSCATED, $message);
+        $message = str_replace("{BOLD}", TextFormat::BOLD, $message);
+        $message = str_replace("{STRIKETHROUGH}", TextFormat::STRIKETHROUGH, $message);
+        $message = str_replace("{UNDERLINE}", TextFormat::UNDERLINE, $message);
+        $message = str_replace("{ITALIC}", TextFormat::ITALIC, $message);
+        $message = str_replace("{RESET}", TextFormat::RESET, $message);
+        return $message;
+    }
+    
+    /**
+     * @return string
+     */
+    public static function generateUniqueId(): string {
+        return "is-" . microtime();
+    }
+    
+}{
+  "MUST_BE_MEMBER": "{YELLOW}You must be part of this island to do this!",
+  "TRY_USING_HELP": "{GREEN}You don't know how to use SkyBlock commands?\n{GREEN}Take a look at: {WHITE}/is help",
+  "HELP_USAGE": "Usage: /is help",
+  "HELP_DESCRIPTION": "Provides information about available commands",
+  "HELP_HEADER": "{RED}___ {WHITE}Command Information {RED}___",
+  "HELP_COMMAND_TEMPLATE": "{GREEN}/is {name}: {WHITE}{description}",
+  "NEED_ISLAND": "{YELLOW}You must be part of an island to do this!",
+  "NEED_TO_BE_FREE": "{YELLOW}You can't do this if you're part of a island!",
+  "SUCCESSFULLY_CREATED_A_ISLAND": "{GREEN}You successfully created a island!",
+  "TELEPORTED_TO_ISLAND": "{GREEN}You've been teleported to your island!",
+  "CREATE_USAGE": "Usage: /is create [generator = Shelly]",
+  "CREATE_DESCRIPTION": "Generates a new island",
+  "JOIN_USAGE": "Usage: /is join",
+  "JOIN_DESCRIPTION": "Teleports you to your island",
+  "MUST_BE_LEADER": "{YELLOW}You must be a leader to do this!",
+  "MUST_BE_FOUNDER": "{YELLOW}You must be the founder to do this!",
+  "MUST_BE_OFFICER": "{YELLOW}You must be a officer to do this!",
+  "LOCK_USAGE": "Usage: /is lock",
+  "LOCK_DESCRIPTION": "Lock or unlock your island. If your island is locked, nobody other than the members will be able to visit it.",
+  "ISLAND_LOCKED": "{GREEN}You successfully locked your island!",
+  "ISLAND_UNLOCKED": "{GREEN}You successfully unlocked your island!",
+  "CHAT_USAGE": "Usage: /is chat",
+  "CHAT_DESCRIPTION": "Switch your chat room between the global chat and your island's chat room",
+  "JOINED_ISLAND_CHAT": "{RED}> {WHITE}You joined your island's chat room!",
+  "JOINED_GLOBAL_CHAT": "{RED}> {WHITE}You joined global chat room!",
+  "VISIT_USAGE": "Usage: /is visit <player>",
+  "VISIT_DESCRIPTION": "Lets you visit an island if it's not locked",
+  "HE_DO_NOT_HAVE_AN_ISLAND": "{name} {YELLOW}doesn't have an island!",
+  "VISITING_ISLAND": "{GREEN}You're visiting {WHITE}{name}{GREEN}'s island!",
+  "HIS_ISLAND_IS_LOCKED": "{name}{YELLOW}'s island is locked! :(",
+  "LEAVE_USAGE": "Usage: /is leave",
+  "LEAVE_DESCRIPTION": "Leave your current island",
+  "FOUNDER_CANNOT_LEAVE": "{YELLOW}The founder can't leave the island!\n{YELLOW}If you want to leave your island, {RED}you'll have to disband it",
+  "LEFT_ISLAND": "{GREEN}You successfully left your island!",
+  "MEMBERS_COMMAND_HEADER": "{RED}__{WHITE}Members ({amount}){RED}__",
+  "ONLINE_MEMBER": "{BOLD}{GREEN}ONLINE{RESET} {WHITE}{name}",
+  "OFFLINE_MEMBER": "{BOLD}{RED}OFFLINE{RESET} {WHITE}{name}",
+  "MEMBERS_USAGE": "Usage: /is members",
+  "MEMBERS_DESCRIPTION": "Show all the members of a island",
+  "NOT_ONLINE_PLAYER": "{name} {YELLOW}is not an online player!",
+  "CANT_BE_YOURSELF": "{YELLOW}You can't do this to yourself!",
+  "CANNOT_INVITE_BECAUSE_HAS_ISLAND": "{YELLOW}Cannot invite {WHITE}{name} {YELLOW}because he is already part of an island!",
+  "YOU_WERE_INVITED_TO_AN_ISLAND": "{RED}> {BOLD}{WHITE}You were invited to {GREEN}{name}'s {WHITE}island!\n{GRAY}* Type {WHITE}/is accept {name} {GRAY}to accept it",
+  "SUCCESSFULLY_INVITED": "{GREEN}You successfully invited {WHITE}{name} {GREEN}to your island!",
+  "INVITE_USAGE": "Usage: /is invite <player>",
+  "INVITE_DESCRIPTION": "Invites a player to your island",
+  "PLAYER_JOINED_THE_ISLAND": "{RED}{BOLD}> {WHITE}{name} {GREEN}joined the island!",
+  "ACCEPT_USAGE": "Usage: /is accept [invitation=last invitation]",
+  "ACCEPT_DESCRIPTION": "Accepts an invitation to join an island",
+  "DENY_USAGE": "Usage: /is accept [invitation=last invitation]",
+  "DENY_DESCRIPTION": "Denies an invitation to join an island",
+  "NOT_VALID_GENERATOR": "{WHITE}{name} {YELLOW}is not a valid island generator!",
+  "ISLAND_DISBANDED": "{YELLOW}{BOLD}Your island was disbanded!",
+  "DISBAND_DESCRIPTION": "Removes your island",
+  "DISBAND_USAGE": "Usage: /is disband",
+  "KICK_USAGE": "Usage: /is kick <player>",
+  "KICK_DESCRIPTION": "Kicks a player from your island",
+  "KICKED_FROM_THE_ISLAND": "{YELLOW}You've been kicked from the island!",
+  "YOU_KICKED_A_PLAYER": "{GREEN}You successfully kicked {WHITE}{name} {GREEN}from your island",
+  "CANNOT_KICK_A_MEMBER": "{YELLOW}You cannot kick a member of your island!",
+  "NOT_A_VISITOR": "{WHITE}{name} {GREEN}is not in your island right now!",
+  "FIRE_USAGE": "Usage: /is fire <player>",
+  "FIRE_DESCRIPTION": "Fires a member from your island!",
+  "MUST_BE_PART_OF_YOUR_ISLAND": "{WHITE}{name} {YELLOW}must be part of your island to do this!",
+  "CANNOT_FIRE_FOUNDER": "{YELLOW}You cannot fire the founder of the island!",
+  "SUCCESSFULLY_FIRED": "{GREEN}You successfully fired {WHITE}{name}{GREEN}!",
+  "YOU_HAVE_BEEN_FIRED": "{YELLOW}You have been fired from your island!",
+  "PROMOTE_USAGE": "Usage: /is promote <player>",
+  "PROMOTE_DESCRIPTION": "Promotes a player to a higher rank",
+  "YOU_HAVE_BEEN_PROMOTED": "{GREEN}You have been promoted!",
+  "CANNOT_PROMOTE_LEADER": "{WHITE}{name} {YELLOW}already has the highest rank!",
+  "OFFICER": "officer",
+  "LEADER": "leader",
+  "MEMBER": "member",
+  "SUCCESSFULLY_PROMOTED_PLAYER": "{WHITE}{name} {GREEN}was promoted to {WHITE}{to}",
+  "DEMOTE_USAGE": "Usage: /is demote <player>",
+  "DEMOTE_DESCRIPTION": "Demotes a player to a lower rank",
+  "CANNOT_DEMOTE_MEMBER": "{WHITE}{name} {YELLOW}already has the lowest rank!",
+  "CANNOT_DEMOTE_FOUNDER": "{YELLOW}You cannot demote the founder of the island!",
+  "YOU_HAVE_BEEN_DEMOTED": "{YELLOW}You have been demoted!",
+  "SUCCESSFULLY_DEMOTED_PLAYER": "{WHITE}{name} {GREEN}was demoted to {WHITE}{to}",
+  "SET_SPAWN_USAGE": "Usage: /is setspawn",
+  "SET_SPAWN_DESCRIPTION": "Sets island spawn",
+  "MUST_BE_IN_YOUR_ISLAND": "{YELLOW}You must be on your island to do this!",
+  "SUCCESSFULLY_SET_SPAWN": "{GREEN}You successfully updated your island spawn!",
+  "TRANSFER_USAGE": "Usage: /is transfer <player>",
+  "TRANSFER_DESCRIPTION": "Transfers your island to other player",
+  "RANK_TRANSFERRED": "{GREEN}You successfully transferred your rank to {WHITE}{name}.\n{GREEN}You've been demoted to member",
+  "GOT_RANK_TRANSFERRED": "{BOLD}{WHITE}{name} {GREEN}transferred the ownership of your island!",
+  "PLAYER_INVITATION_DENIED": "{WHITE}{name} {YELLOW}denied the invitation to join the island",
+  "ISLAND_CATEGORY": "{GREEN}Your island has been categorized as {WHITE}{category}.\n{GREEN}Make it bigger to improve your category!",
+  "ISLAND_IS_FULL_BUT_YOU_CAN_UPGRADE": "{YELLOW}You can't invite nobody else to your island because it's full!\n{GRAY}* You can get more slots increasing your island size to {WHITE}{next}",
+  "ISLAND_IS_FULL": "{YELLOW}You can't invite nobody else to your island because it's full!",
+  "ISLAND_BLOCKS": "{GREEN}Your island's team has placed {WHITE}{amount} {GREEN}blocks",
+  "BLOCKS_USAGE": "Usage: /is blocks",
+  "BLOCKS_DESCRIPTION": "Shows the amount of blocks built by your island's team",
+  "CATEGORY_USAGE": "Usage: /is category",
+  "CATEGORY_DESCRIPTION": "Shows your island's category",
+  "INVITATION_REFUSED": "{GREEN}You refused an invitation!",
+  "ALREADY_ON_YOUR_ISLAND": "{YELLOW}{name} is already a member of your island!",
+  "ALREADY_A_COOPERATOR": "{YELLOW}{name} is already a cooperator!",
+  "ADDED_A_COOPERATOR": "{WHITE}{name} {GREEN}now can cooperate with you on your island",
+  "NOW_YOU_CAN_COOPERATE": "{WHITE}{name} {GREEN}gave you permission to cooperate in his island!",
+  "REMOVED_A_COOPERATOR": "{WHITE}{name} {GREEN}is no longer a cooperator!",
+  "NOW_YOU_CANNOT_COOPERATE": "{WHITE}{name} {GREEN}revoked you the permission to cooperate in his island!",
+  "COOPERATE_USAGE": "{WHITE}Usage: /is cooperate <player>",
+  "COOPERATE_DESCRIPTION": "Allows another player to interact with your island",
+  "YOU_HAVE_TO_WAIT": "{YELLOW}To create another island you have to wait {WHITE}{minutes} {YELLOW}minutes!",
+  "BLOCKED_COMMAND": "{YELLOW}That command is not allowed in the islands!"
+}
+{
+  "default-chest": ["325,8,2", "325,10,1", "79,0,2", "360", "352,0,12", "361", "81", "338", "297", "296", "298", "299", "300",
+    "301"],
+  "chest-per-generator": {
+  },
+  "slots-by-size": {
+    "XS": 2,
+    "S": 5,
+    "M": 10,
+    "L": 15,
+    "XL": 20
+  },
+  "cooldown-duration-minutes": 20,
+  "prevent-void-damage": true,
+  "commands-blocked-in-isles": [
+    "sethome",
+    "home"
+  ]
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock;
+
+
+use pocketmine\item\Item;
+
+class SkyBlockSettings {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /** @var array */
+    private $data;
+    
+    /** @var string[] */
+    private $slotsBySize = [];
+    
+    /** @var Item[] */
+    private $defaultChest;
+    
+    /** @var array */
+    private $chestPerGenerator;
+    
+    /** @var string[] */
+    private $messages = [];
+
+    /** @var int */
+    private $cooldownDuration;
+
+    /** @var bool */
+    private $preventVoidDamage;
+
+    /** @var array */
+    private $isleBlockedCommands = [];
+    
+    /**
+     * SkyBlockSettings constructor.
+     * @param SkyBlock $plugin
+     */
+    public function __construct(SkyBlock $plugin) {
+        $this->plugin = $plugin;
+        $this->refresh();
+    }
+    
+    /**
+     * @param string $size
+     * @return int
+     */
+    public function getSlotsBySize(string $size): int {
+        return $this->slotsBySize[$size] ?? 1;
+    }
+    
+    /**
+     * @return Item[]
+     */
+    public function getDefaultChest(): array {
+        return $this->defaultChest;
+    }
+    
+    /**
+     * @param string $generator
+     * @return array
+     */
+    public function getChestPerGenerator(string $generator): array {
+        return $this->chestPerGenerator[$generator] ?? $this->defaultChest;
+    }
+    
+    /**
+     * @return string[]
+     */
+    public function getMessages(): array {
+        return $this->messages;
+    }
+
+    /**
+     * @return int
+     */
+    public function getCooldownDuration(): int {
+        return $this->cooldownDuration;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isPreventVoidDamage(): bool {
+        return $this->preventVoidDamage;
+    }
+
+    /**
+     * @return array
+     */
+    public function getIsleBlockedCommands(): array {
+        return $this->isleBlockedCommands;
+    }
+
+    /**
+     * @param string $identifier
+     * @param array $args
+     * @return string
+     */
+    public function getMessage(string $identifier, array $args = []): string {
+        $message = $this->messages[$identifier] ?? "Message ($identifier) not found";
+        $message = SkyBlock::translateColors($message);
+        foreach($args as $arg => $value) {
+            $message = str_replace("{" . $arg . "}", $value, $message);
+        }
+        return $message;
+    }
+
+    public function refresh(): void {
+        $this->data = json_decode(file_get_contents($this->plugin->getDataFolder() . "settings.json"), true);
+        $this->messages = json_decode(file_get_contents($this->plugin->getDataFolder() . "messages.json"), true);
+        $this->slotsBySize = $this->data["slots-by-size"];
+        $this->defaultChest = SkyBlock::parseItems($this->data["default-chest"]);
+        $this->chestPerGenerator = [];
+        foreach($this->data["chest-per-generator"] as $world => $items) {
+            $this->chestPerGenerator[$world] = SkyBlock::parseItems($items);
+        }
+        $this->cooldownDuration = $this->data["cooldown-duration-minutes"] ?? 20;
+        $this->preventVoidDamage = $this->data["prevent-void-damage"] ?? true;
+        $this->isleBlockedCommands = $this->data["commands-blocked-in-isles"] ?? [];
+        $this->isleBlockedCommands = array_map("strtolower", $this->isleBlockedCommands);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\provider\json;
+
+
+use pocketmine\utils\Config;
+use room17\SkyBlock\isle\Isle;
+use room17\SkyBlock\provider\Provider;
+use room17\SkyBlock\session\BaseSession;
+use room17\SkyBlock\session\Session;
+
+class JSONProvider extends Provider {
+    
+    public function initialize(): void {
+        $dataFolder = $this->plugin->getDataFolder();
+        if(!is_dir($dataFolder . "isles")) {
+            mkdir($dataFolder . "isles");
+        }
+        if(!is_dir($dataFolder . "users")) {
+            mkdir($dataFolder . "users");
+        }
+    }
+    
+    /**
+     * @param string $username
+     * @return Config
+     */
+    private function getUserConfig(string $username): Config {
+        return new Config($this->plugin->getDataFolder() . "users/$username.json", Config::JSON, [
+                "isle" => null,
+                "rank" => Session::RANK_DEFAULT
+            ]);
+    }
+    
+    /**
+     * @param string $isleId
+     * @return Config
+     */
+    private function getIsleConfig(string $isleId): Config {
+        return new Config($this->plugin->getDataFolder() . "isles/$isleId.json", Config::JSON);
+    }
+    
+    /**
+     * @param BaseSession $session
+     */
+    public function loadSession(BaseSession $session): void {
+        $config = $this->getUserConfig($session->getUsername());
+        $session->setIsleId($config->get("isle", null) ?? null);
+        $session->setRank($config->get("rank", null) ?? Session::RANK_DEFAULT);
+        $session->setLastIslandCreationTime($config->get("lastIsle", null) ?? null);
+    }
+    
+    /**
+     * @param BaseSession $session
+     */
+    public function saveSession(BaseSession $session): void {
+        $config = $this->getUserConfig($session->getUsername());
+        $config->set("isle", $session->getIsleId());
+        $config->set("rank", $session->getRank());
+        $config->set("lastIsle", $session->getLastIslandCreationTime());
+        $config->save();
+    }
+
+    /**
+     * @param string $identifier
+     * @throws \ReflectionException
+     */
+    public function loadIsle(string $identifier): void {
+        if($this->plugin->getIsleManager()->getIsle($identifier) != null) {
+            return;
+        }
+        $config = $this->getIsleConfig($identifier);
+        $server = $this->plugin->getServer();
+        if(!$server->isLevelLoaded($identifier)) {
+            $server->loadLevel($identifier);
+        }
+        
+        $members = [];
+        foreach($config->get("members", []) as $username) {
+            $members[] = $this->plugin->getSessionManager()->getOfflineSession($username);
+        }
+        
+        $this->plugin->getIsleManager()->openIsle(
+            $identifier,
+            $members,
+            $config->get("locked"),
+            $config->get("type", null) ?? "basic",
+            $server->getLevelByName($identifier),
+            $config->get("blocks") ?? 0
+        );
+    }
+    
+    /**
+     * @param Isle $isle
+     */
+    public function saveIsle(Isle $isle): void {
+        $config = $this->getIsleConfig($isle->getIdentifier());
+        $config->set("identifier", $isle->getIdentifier());
+        $config->set("locked", $isle->isLocked());
+        $config->set("type", $isle->getType());
+        $config->set("blocks", $isle->getBlocksBuilt());
+        
+        $members = [];
+        foreach($isle->getMembers() as $member) {
+            $members[] = $member->getUsername();
+        }
+        $config->set("members", $members);
+        
+        $config->save();
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\provider;
+
+
+use room17\SkyBlock\isle\Isle;
+use room17\SkyBlock\session\BaseSession;
+use room17\SkyBlock\SkyBlock;
+
+abstract class Provider {
+    
+    /** @var SkyBlock */
+    protected $plugin;
+    
+    /**
+     * Provider constructor.
+     * @param SkyBlock $plugin
+     */
+    public function __construct(SkyBlock $plugin) {
+        $this->plugin = $plugin;
+        $this->initialize();
+    }
+    
+    public abstract function initialize(): void;
+    
+    /**
+     * @param BaseSession $session
+     */
+    public abstract function loadSession(BaseSession $session): void;
+    
+    /**
+     * @param BaseSession $session
+     */
+    public abstract function saveSession(BaseSession $session): void;
+    
+    /**
+     * @param string $identifier
+     */
+    public abstract function loadIsle(string $identifier): void;
+    
+    /**
+     * @param Isle $isle
+     */
+    public abstract function saveIsle(Isle $isle): void;
+    
+}
+<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\session;
+
+
+use pocketmine\Player;
+use room17\SkyBlock\event\session\SessionCloseEvent;
+use room17\SkyBlock\event\session\SessionOpenEvent;
+use room17\SkyBlock\SkyBlock;
+
+class SessionManager {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /** @var Session[] */
+    private $sessions = [];
+    
+    /**
+     * SessionManager constructor.
+     * @param SkyBlock $plugin
+     */
+    public function __construct(SkyBlock $plugin) {
+        $this->plugin = $plugin;
+        $plugin->getServer()->getPluginManager()->registerEvents(new SessionListener($this), $plugin);
+    }
+    
+    /**
+     * @return SkyBlock
+     */
+    public function getPlugin(): SkyBlock {
+        return $this->plugin;
+    }
+    
+    /**
+     * @return Session[]
+     */
+    public function getSessions(): array {
+        return $this->sessions;
+    }
+    
+    /**
+     * @param string $username
+     * @return null|OfflineSession
+     */
+    public function getOfflineSession(string $username): ?OfflineSession {
+        return new OfflineSession($this, $username);
+    }
+    
+    /**
+     * @param Player $player
+     * @return null|Session
+     */
+    public function getSession(Player $player): ?Session {
+        return $this->sessions[$player->getName()] ?? null;
+    }
+
+    /**
+     * @param Player $player
+     * @throws \ReflectionException
+     */
+    public function openSession(Player $player): void {
+        $this->sessions[$username = $player->getName()] = new Session($this, $player);
+        (new SessionOpenEvent($this->sessions[$username]))->call();
+    }
+
+    /**
+     * @param Player $player
+     * @throws \ReflectionException
+     */
+    public function closeSession(Player $player): void {
+        if(isset($this->sessions[$username = $player->getName()])) {
+            $session = $this->sessions[$username];
+            $session->save();
+            (new SessionCloseEvent($session))->call();
+            unset($this->sessions[$username]);
+            if($session->hasIsle()) {
+                $session->getIsle()->tryToClose();
+            }
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\session;
+
+
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerLoginEvent;
+use pocketmine\event\player\PlayerQuitEvent;
+
+class SessionListener implements Listener {
+    
+    /** @var SessionManager */
+    private $manager;
+    
+    /**
+     * SessionListener constructor.
+     * @param SessionManager $manager
+     */
+    public function __construct(SessionManager $manager) {
+        $this->manager = $manager;
+    }
+
+    /**
+     * @param PlayerLoginEvent $event
+     * @throws \ReflectionException
+     */
+    public function onLogin(PlayerLoginEvent $event): void {
+        $this->manager->openSession($event->getPlayer());
+    }
+
+    /**
+     * @param PlayerQuitEvent $event
+     * @throws \ReflectionException
+     */
+    public function onQuit(PlayerQuitEvent $event): void {
+        $this->manager->closeSession($event->getPlayer());
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\isle;
+
+
+use pocketmine\level\Level;
+use room17\SkyBlock\event\isle\IsleCreateEvent;
+use room17\SkyBlock\event\isle\IsleDisbandEvent;
+use room17\SkyBlock\event\isle\IsleOpenEvent;
+use room17\SkyBlock\event\isle\IsleCloseEvent;
+use room17\SkyBlock\generator\IsleGenerator;
+use room17\SkyBlock\session\BaseSession;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class IsleManager {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /** @var Isle[] */
+    private $isles = [];
+    
+    /**
+     * IsleManager constructor.
+     * @param SkyBlock $plugin
+     */
+    public function __construct(SkyBlock $plugin) {
+        $this->plugin = $plugin;
+    }
+    
+    /**
+     * @return SkyBlock
+     */
+    public function getPlugin(): SkyBlock {
+        return $this->plugin;
+    }
+    
+    /**
+     * @return Isle[]
+     */
+    public function getIsles(): array {
+        return $this->isles;
+    }
+    
+    /**
+     * @param string $identifier
+     * @return null|Isle
+     */
+    public function getIsle(string $identifier): ?Isle {
+        return $this->isles[$identifier] ?? null;
+    }
+
+    /**
+     * @param Session $session
+     * @param string $type
+     * @throws \ReflectionException
+     */
+    public function createIsleFor(Session $session, string $type): void {
+        $identifier = SkyBlock::generateUniqueId();
+
+        $generatorManager = $this->plugin->getGeneratorManager();
+        if($generatorManager->isGenerator($type)) {
+            $generator = $generatorManager->getGenerator($type);
+        } else {
+            $generator = $generatorManager->getGenerator("Basic");
+        }
+    
+        $server = $this->plugin->getServer();
+        $server->generateLevel($identifier, null, $generator);
+        $server->loadLevel($identifier);
+        $level = $server->getLevelByName($identifier);
+        /** @var IsleGenerator $generator */
+        $level->setSpawnLocation($generator::getWorldSpawn());
+        
+        $this->openIsle($identifier, [$session->getOffline()], true, $type, $level, 0);
+        $session->setIsle($isle = $this->isles[$identifier]);
+        $session->setRank(BaseSession::RANK_FOUNDER);
+        $session->save();
+        $isle->save();
+        $session->setLastIslandCreationTime(microtime(true));
+        (new IsleCreateEvent($isle))->call();
+    }
+
+    /**
+     * @param Isle $isle
+     * @throws \ReflectionException
+     */
+    public function disbandIsle(Isle $isle): void {
+        foreach($isle->getLevel()->getPlayers() as $player) {
+            $player->teleport($player->getServer()->getDefaultLevel()->getSpawnLocation());
+        }
+        foreach($isle->getMembers() as $offlineMember) {
+            $onlineSession = $offlineMember->getSession();
+            if($onlineSession != null) {
+                $onlineSession->setIsle(null);
+                $onlineSession->setRank(Session::RANK_DEFAULT);
+                $onlineSession->save();
+                $onlineSession->sendTranslatedMessage("ISLAND_DISBANDED");
+            } else {
+                $offlineMember->setIsleId(null);
+                $offlineMember->setRank(Session::RANK_DEFAULT);
+                $offlineMember->save();
+            }
+        }
+        $isle->setMembers([]);
+        $isle->save();
+        $this->closeIsle($isle);
+        (new IsleDisbandEvent($isle))->call();
+    }
+
+    /**
+     * @param string $identifier
+     * @param array $members
+     * @param bool $locked
+     * @param string $type
+     * @param Level $level
+     * @param int $blocksBuilt
+     * @throws \ReflectionException
+     */
+    public function openIsle(string $identifier, array $members, bool $locked, string $type, Level $level, int $blocksBuilt): void {
+        $this->isles[$identifier] = new Isle($this, $identifier, $members, $locked, $type, $level, $blocksBuilt);
+        (new IsleOpenEvent($this->isles[$identifier]))->call();
+    }
+
+    /**
+     * @param Isle $isle
+     * @throws \ReflectionException
+     */
+    public function closeIsle(Isle $isle): void {
+        $isle->save();
+        $server = $this->plugin->getServer();
+        (new IsleCloseEvent($isle))->call();
+        $server->unloadLevel($isle->getLevel());
+        unset($this->isles[$isle->getIdentifier()]);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\generator;
+
+use pocketmine\level\generator\GeneratorManager as GManager;
+use room17\SkyBlock\generator\presets\BasicIsland;
+use room17\SkyBlock\generator\presets\LostIsland;
+use room17\SkyBlock\generator\presets\OPIsland;
+use room17\SkyBlock\generator\presets\PalmIsland;
+use room17\SkyBlock\generator\presets\ShellyGenerator;
+use room17\SkyBlock\SkyBlock;
+
+class IsleGeneratorManager {
+
+    /** @var SkyBlock */
+    private $plugin;
+
+    /** @var string[] */
+    private $generators = [];
+    
+    /**
+     * GeneratorManager constructor.
+     * @param SkyBlock $plugin
+     */
+    public function __construct(SkyBlock $plugin) {
+        $this->plugin = $plugin;
+        $this->registerDefaultGenerators();
+    }
+    
+    /**
+     * @return string[]
+     */
+    public function getGenerators(): array {
+        return $this->generators;
+    }
+    
+    /**
+     * @param string $name
+     * @return null|string
+     */
+    public function getGenerator(string $name): ?string {
+        return $this->generators[strtolower($name)] ?? null;
+    }
+
+    /**
+     * Return if a generator exists
+     *
+     * @param string $name
+     * @return bool
+     */
+    public function isGenerator(string $name): bool {
+        return isset($this->generators[strtolower($name)]);
+    }
+    
+    /**
+     * @param string $name
+     * @param string $class
+     */
+    public function registerGenerator(string $name, string $class): void {
+        GManager::addGenerator($class, $name, true);
+        if(isset($this->generators[$name])) {
+            $this->plugin->getLogger()->debug("Overwriting generator: $name");
+        }
+        $this->generators[$name] = $class;
+    }
+
+    private function registerDefaultGenerators(): void {
+        $this->registerGenerator("basic", BasicIsland::class);
+        $this->registerGenerator("op", OPIsland::class);
+        $this->registerGenerator("shelly", ShellyGenerator::class);
+        $this->registerGenerator("palm", PalmIsland::class);
+        $this->registerGenerator("lost", LostIsland::class);
+    }
+
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\generator\presets;
+
+use pocketmine\block\Block;
+use pocketmine\block\BlockIds;
+use pocketmine\level\generator\object\Tree;
+use pocketmine\math\Vector3;
+use room17\SkyBlock\generator\IsleGenerator;
+
+class BasicIsland extends IsleGenerator {
+    
+    /**
+     * @return string
+     */
+    public function getName(): string {
+        return "Basic";
+    }
+    
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function generateChunk(int $chunkX, int $chunkZ) : void {
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+        $chunk->setGenerated();
+        if($chunkX == 0 && $chunkZ == 0) {
+            for ($x = 6; $x < 12; $x++) {
+                for ($z = 6; $z < 12; $z++) {
+		    $chunk->setBlock($x, 61, $z, Block::DIRT);
+                    $chunk->setBlock($x, 62, $z, Block::DIRT);
+                    $chunk->setBlock($x, 63, $z, Block::GRASS);
+                }
+            }
+            for($airX = 9; $airX < 12; $airX++) {
+            	for($airZ = 9; $airZ < 12; $airZ++) {
+		    $chunk->setBlock($airX, 61, $airZ, Block::AIR);
+		    $chunk->setBlock($airX, 62, $airZ, Block::AIR);
+		    $chunk->setBlock($airX, 63, $airZ, Block::AIR);
+		}
+	    }
+	    Tree::growTree($this->level, 11 , 64, 6, $this->random, 0);
+            $chunk->setBlock(8, 64, 7, Block::CHEST);
+            $chunk->setX($chunkX);
+            $chunk->setZ($chunkZ);
+            $this->level->setChunk($chunkX, $chunkZ, $chunk);
+        }
+        if($chunkX == 4 and $chunkZ == 0) {
+            for($x = 6; $x < 11; $x++) {
+                for($z = 6; $z < 11; $z++) {
+                    for($y = 60; $y < 65; $y++) {
+		        $chunk->setBlock($x, $y, $z, Block::SAND);
+		    }
+		}
+	    }
+	    $chunk->setBlock(8, 65, 8, BlockIds::CACTUS);
+	}
+    }
+    
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function populateChunk(int $chunkX, int $chunkZ) : void {
+        return;
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public static function getWorldSpawn(): Vector3 {
+        return new Vector3(7, 66, 7);
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public static function getChestPosition(): Vector3 {
+        return new Vector3(8, 64, 7);
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public function getSpawn(): Vector3 {
+        return new Vector3(7, 66, 7);
+    }
+
+}
+<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\generator;
+
+
+use pocketmine\level\generator\Generator;
+use pocketmine\math\Vector3;
+
+abstract class IsleGenerator extends Generator {
+    
+    /** @var array */
+    protected $settings;
+    
+    /**
+     * IsleGenerator constructor.
+     * @param array $settings
+     */
+    public function __construct(array $settings = []) {
+        $this->settings = $settings;
+    }
+    
+    /**
+     * @return array
+     */
+    public function getSettings(): array {
+        return $this->settings;
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public abstract static function getWorldSpawn(): Vector3;
+    
+    /**
+     * @return Vector3
+     */
+    public abstract static function getChestPosition(): Vector3;
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\generator\presets;
+
+use pocketmine\block\Block;
+use pocketmine\level\generator\object\Tree;
+use pocketmine\math\Vector3;
+use room17\SkyBlock\generator\IsleGenerator;
+
+class OPIsland extends IsleGenerator {
+    
+    /**
+     * @return string
+     */
+	public function getName(): string {
+		return "OP";
+	}
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+	public function generateChunk(int $chunkX, int $chunkZ) : void {
+		$chunk = $this->level->getChunk($chunkX, $chunkZ);
+		$chunk->setGenerated();
+		if($chunkX == 0 && $chunkZ == 0) {
+			for ($x = 0; $x < 16; $x++) {
+				for ($z = 0; $z < 16; $z++) {
+					$chunk->setBlock($x, 0, $z, Block::BEDROCK);
+					for ($y = 1; $y <= 3; $y++) {
+						$chunk->setBlock($x, $y, $z, Block::STONE);
+					}
+					$chunk->setBlock($x, 4, $z, Block::DIRT);
+					$chunk->setBlock($x, 5, $z, Block::GRASS);
+				}
+			}
+            Tree::growTree($this->level, 8, 6, 8, $this->random, 0);
+			$chunk->setBlock(10, 6, 8, Block::CHEST);
+			$chunk->setX($chunkX);
+			$chunk->setZ($chunkZ);
+			$this->level->setChunk($chunkX, $chunkZ, $chunk);
+		}
+	}
+    
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+	public function populateChunk(int $chunkX, int $chunkZ) : void {
+		return;
+	}
+    
+    /**
+     * @return Vector3
+     */
+    public static function getWorldSpawn(): Vector3 {
+        return new Vector3(8, 7, 10);
+    }
+	
+    /**
+     * @return Vector3
+     */
+	public static function getChestPosition(): Vector3 {
+	    return new Vector3(10, 6, 8);
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public function getSpawn(): Vector3 {
+        return new Vector3(8, 7, 10);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\generator\presets;
+
+
+use pocketmine\block\Block;
+use pocketmine\math\Vector3;
+use room17\SkyBlock\generator\IsleGenerator;
+
+class ShellyGenerator extends IsleGenerator {
+    
+    /**
+     * @return string
+     */
+    public function getName(): string {
+        return "Shelly";
+    }
+    
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function generateChunk(int $chunkX, int $chunkZ): void {
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+        $chunk->setGenerated();
+        if($chunkX == 0 && $chunkZ == 0) {
+            $chunk->setBlock(11, 34, 9, Block::GRASS);
+            $chunk->setBlock(11, 35, 9, Block::FENCE);
+            $chunk->setBlock(11, 32, 8, Block::DIRT);
+            $chunk->setBlock(11, 33, 8, Block::DIRT);
+            $chunk->setBlock(11, 34, 8, Block::GRASS);
+            $chunk->setBlock(11, 35, 8, Block::FENCE);
+            $chunk->setBlock(11, 33, 7, Block::DIRT);
+            $chunk->setBlock(11, 34, 7, Block::GRASS);
+            $chunk->setBlock(11, 35, 7, Block::FENCE);
+            $chunk->setBlock(10, 33, 10, Block::DIRT);
+            $chunk->setBlock(10, 34, 10, Block::GRASS);
+            $chunk->setBlock(10, 32, 9, Block::STONE);
+            $chunk->setBlock(10, 33, 9, Block::DIRT);
+            $chunk->setBlock(10, 34, 9, Block::COBBLESTONE);
+            $chunk->setBlock(10, 31, 8, Block::STONE);
+            $chunk->setBlock(10, 32, 8, Block::STONE);
+            $chunk->setBlock(10, 33, 8, Block::DIRT);
+            $chunk->setBlock(10, 34, 8, Block::SAND);
+            $chunk->setBlock(10, 32, 7, Block::STONE);
+            $chunk->setBlock(10, 33, 7, Block::DIRT);
+            $chunk->setBlock(10, 34, 7, Block::GRAVEL);
+            $chunk->setBlock(10, 35, 7, Block::FENCE);
+            $chunk->setBlock(10, 33, 6, Block::DIRT);
+            $chunk->setBlock(10, 34, 6, Block::GRASS);
+            $chunk->setBlock(10, 35, 6, Block::FENCE);
+            $chunk->setBlock(9, 34, 11, Block::GRASS);
+            $chunk->setBlock(9, 32, 10, Block::STONE);
+            $chunk->setBlock(9, 33, 10, Block::DIRT);
+            $chunk->setBlock(9, 34, 10, Block::GRASS);
+            $chunk->setBlock(9, 31, 9, Block::STONE);
+            $chunk->setBlock(9, 32, 9, Block::STONE);
+            $chunk->setBlock(9, 33, 9, Block::DIRT);
+            $chunk->setBlock(9, 34, 9, Block::GRASS);
+            $chunk->setBlock(9, 30, 8, Block::STONE);
+            $chunk->setBlock(9, 31, 8, Block::STONE);
+            $chunk->setBlock(9, 32, 8, Block::STONE);
+            $chunk->setBlock(9, 33, 8, Block::DIRT);
+            $chunk->setBlock(9, 34, 8, Block::GRAVEL);
+            $chunk->setBlock(9, 31, 7, Block::STONE);
+            $chunk->setBlock(9, 32, 7, Block::STONE);
+            $chunk->setBlock(9, 33, 7, Block::DIRT);
+            $chunk->setBlock(9, 34, 7, Block::COBBLESTONE);
+            $chunk->setBlock(9, 32, 6, Block::STONE);
+            $chunk->setBlock(9, 33, 6, Block::DIRT);
+            $chunk->setBlock(9, 34, 6, Block::GRAVEL);
+            $chunk->setBlock(9, 35, 6, Block::FENCE);
+            $chunk->setBlock(9, 33, 5, Block::DIRT);
+            $chunk->setBlock(9, 34, 5, Block::GRASS);
+            $chunk->setBlock(8, 32, 11, Block::DIRT);
+            $chunk->setBlock(8, 33, 11, Block::DIRT);
+            $chunk->setBlock(8, 34, 11, Block::GRASS);
+            $chunk->setBlock(8, 31, 10, Block::STONE);
+            $chunk->setBlock(8, 32, 10, Block::STONE);
+            $chunk->setBlock(8, 33, 10, Block::DIRT);
+            $chunk->setBlock(8, 34, 10, Block::GRASS);
+            $chunk->setBlock(8, 30, 9, Block::STONE);
+            $chunk->setBlock(8, 31, 9, Block::STONE);
+            $chunk->setBlock(8, 32, 9, Block::STONE);
+            $chunk->setBlock(8, 33, 9, Block::DIRT);
+            $chunk->setBlock(8, 34, 9, Block::GRASS);
+            $chunk->setBlock(8, 30, 8, Block::STONE);
+            $chunk->setBlock(8, 31, 8, Block::STONE);
+            $chunk->setBlock(8, 32, 8, Block::STONE);
+            $chunk->setBlock(8, 33, 8, Block::DIRT);
+            $chunk->setBlock(8, 34, 8, Block::GRASS);
+            $chunk->setBlock(8, 30, 7, Block::STONE);
+            $chunk->setBlock(8, 31, 7, Block::STONE);
+            $chunk->setBlock(8, 32, 7, Block::STONE);
+            $chunk->setBlock(8, 33, 7, Block::DIRT);
+            $chunk->setBlock(8, 34, 7, Block::GRAVEL);
+            $chunk->setBlock(8, 31, 6, Block::STONE);
+            $chunk->setBlock(8, 32, 6, Block::STONE);
+            $chunk->setBlock(8, 33, 6, Block::DIRT);
+            $chunk->setBlock(8, 34, 6, Block::SAND);
+            $chunk->setBlock(8, 32, 5, Block::DIRT);
+            $chunk->setBlock(8, 33, 5, Block::DIRT);
+            $chunk->setBlock(8, 34, 5, Block::GRAVEL);
+            $chunk->setBlock(7, 33, 11, Block::DIRT);
+            $chunk->setBlock(7, 34, 11, Block::GRASS);
+            $chunk->setBlock(7, 32, 10, Block::STONE);
+            $chunk->setBlock(7, 33, 10, Block::DIRT);
+            $chunk->setBlock(7, 34, 10, Block::GRASS);
+            $chunk->setBlock(7, 31, 9, Block::STONE);
+            $chunk->setBlock(7, 32, 9, Block::STONE);
+            $chunk->setBlock(7, 33, 9, Block::DIRT);
+            $chunk->setBlock(7, 34, 9, Block::GRASS);
+            $chunk->setBlock(7, 30, 8, Block::STONE);
+            $chunk->setBlock(7, 31, 8, Block::STONE);
+            $chunk->setBlock(7, 32, 8, Block::STONE);
+            $chunk->setBlock(7, 33, 8, Block::DIRT);
+            $chunk->setBlock(7, 34, 8, Block::GRASS);
+            $chunk->setBlock(7, 33, 8, Block::DIRT);
+            $chunk->setBlock(7, 31, 7, Block::STONE);
+            $chunk->setBlock(7, 32, 7, Block::STONE);
+            $chunk->setBlock(7, 33, 7, Block::DIRT);
+            $chunk->setBlock(7, 34, 7, Block::COBBLESTONE);
+            $chunk->setBlock(7, 32, 6, Block::STONE);
+            $chunk->setBlock(7, 33, 6, Block::DIRT);
+            $chunk->setBlock(7, 34, 6, Block::GRAVEL);
+            $chunk->setBlock(7, 34, 5, Block::GRASS);
+            $chunk->setBlock(6, 32, 10, Block::DIRT);
+            $chunk->setBlock(6, 33, 10, Block::DIRT);
+            $chunk->setBlock(6, 34, 10, Block::GRASS);
+            $chunk->setBlock(6, 32, 9, Block::STONE);
+            $chunk->setBlock(6, 33, 9, Block::DIRT);
+            $chunk->setBlock(6, 34, 9, Block::GRASS);
+            $chunk->setBlock(6, 31, 8, Block::STONE);
+            $chunk->setBlock(6, 32, 8, Block::STONE);
+            $chunk->setBlock(6, 33, 8, Block::DIRT);
+            $chunk->setBlock(6, 34, 8, Block::DIRT);
+            $chunk->setBlock(6, 35, 8, Block::CHEST);
+            $chunk->setBlock(6, 32, 7, Block::STONE);
+            $chunk->setBlock(6, 33, 7, Block::DIRT);
+            $chunk->setBlock(6, 34, 7, Block::SAND);
+            $chunk->setBlock(6, 32, 6, Block::DIRT);
+            $chunk->setBlock(6, 33, 6, Block::DIRT);
+            $chunk->setBlock(6, 34, 6, Block::GRASS);
+            $chunk->setBlock(5, 33, 9, Block::DIRT);
+            $chunk->setBlock(5, 34, 9, Block::DIRT);
+            $chunk->setBlock(5, 35, 9, Block::HAY_BALE);
+            $chunk->setBlock(5, 32, 8, Block::DIRT);
+            $chunk->setBlock(5, 33, 8, Block::DIRT);
+            $chunk->setBlock(5, 34, 8, Block::DIRT);
+            $chunk->setBlock(5, 35, 8, Block::HAY_BALE);
+            $chunk->setBlock(5, 36, 8, Block::HAY_BALE);
+            $chunk->setBlock(5, 33, 7, Block::DIRT);
+            $chunk->setBlock(5, 34, 7, Block::DIRT);
+            $chunk->setBlock(5, 35, 7, Block::LOG);
+            $chunk->setBlock(5, 36, 7, Block::LOG);
+            $chunk->setBlock(5, 37, 7, Block::LOG);
+            $chunk->setBlock(5, 38, 7, Block::LOG);
+            $chunk->setBlock(5, 39, 7, Block::LOG);
+            $chunk->setBlock(5, 40, 7, Block::LOG);
+            $chunk->setBlock(5, 41, 7, Block::LEAVES);
+            $chunk->setBlock(5, 38, 6, Block::LEAVES);
+            $chunk->setBlock(5, 39, 6, Block::LEAVES);
+            $chunk->setBlock(5, 40, 6, Block::LEAVES);
+            $chunk->setBlock(5, 41, 6, Block::LEAVES);
+            $chunk->setBlock(6, 38, 7, Block::LEAVES);
+            $chunk->setBlock(6, 39, 7, Block::LEAVES);
+            $chunk->setBlock(6, 40, 7, Block::LEAVES);
+            $chunk->setBlock(6, 41, 7, Block::LEAVES);
+            $chunk->setBlock(5, 38, 8, Block::LEAVES);
+            $chunk->setBlock(5, 39, 8, Block::LEAVES);
+            $chunk->setBlock(5, 40, 8, Block::LEAVES);
+            $chunk->setBlock(5, 41, 8, Block::LEAVES);
+            $chunk->setBlock(4, 38, 7, Block::LEAVES);
+            $chunk->setBlock(5, 39, 8, Block::LEAVES);
+            $chunk->setBlock(5, 40, 8, Block::LEAVES);
+            $chunk->setBlock(5, 41, 8, Block::LEAVES);
+            $chunk->setBlock(7, 38, 7, Block::LEAVES);
+            $chunk->setBlock(7, 39, 7, Block::LEAVES);
+            $chunk->setBlock(7, 40, 7, Block::LEAVES);
+            $chunk->setBlock(6, 38, 8, Block::LEAVES);
+            $chunk->setBlock(6, 39, 8, Block::LEAVES);
+            $chunk->setBlock(6, 40, 8, Block::LEAVES);
+            $chunk->setBlock(5, 38, 9, Block::LEAVES);
+            $chunk->setBlock(5, 39, 9, Block::LEAVES);
+            $chunk->setBlock(5, 40, 9, Block::LEAVES);
+            $chunk->setBlock(4, 38, 8, Block::LEAVES);
+            $chunk->setBlock(4, 39, 8, Block::LEAVES);
+            $chunk->setBlock(4, 40, 8, Block::LEAVES);
+            $chunk->setBlock(3, 38, 7, Block::LEAVES);
+            $chunk->setBlock(3, 39, 7, Block::LEAVES);
+            $chunk->setBlock(3, 40, 7, Block::LEAVES);
+            $chunk->setBlock(4, 38, 6, Block::LEAVES);
+            $chunk->setBlock(4, 39, 6, Block::LEAVES);
+            $chunk->setBlock(4, 40, 6, Block::LEAVES);
+            $chunk->setBlock(5, 38, 5, Block::LEAVES);
+            $chunk->setBlock(5, 39, 5, Block::LEAVES);
+            $chunk->setBlock(5, 40, 5, Block::LEAVES);
+            $chunk->setBlock(6, 38, 6, Block::LEAVES);
+            $chunk->setBlock(6, 39, 6, Block::LEAVES);
+            $chunk->setBlock(6, 40, 6, Block::LEAVES);
+            $chunk->setBlock(7, 39, 8, Block::LEAVES);
+            $chunk->setBlock(7, 38, 6, Block::LEAVES);
+            $chunk->setBlock(6, 39, 5, Block::LEAVES);
+            $chunk->setBlock(4, 38, 5, Block::LEAVES);
+            $chunk->setBlock(4, 39, 5, Block::LEAVES);
+            $chunk->setBlock(3, 38, 6, Block::LEAVES);
+            $chunk->setBlock(3, 39, 8, Block::LEAVES);
+            $chunk->setBlock(4, 39, 9, Block::LEAVES);
+            $chunk->setBlock(6, 38, 9, Block::LEAVES);
+            $chunk->setBlock(4, 39, 7, Block::LEAVES);
+            $chunk->setBlock(4, 40, 7, Block::LEAVES);
+            $chunk->setBlock(4, 41, 7, Block::LEAVES);
+            $chunk->setX($chunkX);
+            $chunk->setZ($chunkZ);
+            $this->level->setChunk($chunkX, $chunkZ, $chunk);
+        }
+    }
+    
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function populateChunk(int $chunkX, int $chunkZ) : void {
+        return;
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public static function getWorldSpawn(): Vector3 {
+        return new Vector3(8, 35, 10);
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public static function getChestPosition(): Vector3 {
+        return new Vector3(6, 35, 8);
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public function getSpawn(): Vector3 {
+        return new Vector3(8, 35, 10);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\generator\presets;
+
+use pocketmine\block\Block;
+use pocketmine\math\Vector3;
+use room17\SkyBlock\generator\IsleGenerator;
+
+class PalmIsland extends IsleGenerator {
+
+    /**
+     * Return generator name
+     *
+     * @return string
+     */
+    public function getName() : string {
+        return "Palm";
+    }
+    
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function generateChunk(int $chunkX, int $chunkZ): void {
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+        $chunk->setGenerated();
+        if($chunkX == 0 and $chunkZ == 0) {
+            $chunk->setBlock(9, 39, 4, Block::SAND);
+            $chunk->setBlock(8, 37, 4, Block::SAND);
+            $chunk->setBlock(8, 35, 5, Block::SAND);
+            $chunk->setBlock(8, 39, 4, Block::SAND);
+            $chunk->setBlock(7, 39, 4, Block::SAND);
+            $chunk->setBlock(10, 39, 5, Block::SAND);
+            $chunk->setBlock(10, 39, 6, Block::END_BRICKS);
+            $chunk->setBlock(11, 39, 7, Block::SAND);
+            $chunk->setBlock(11, 39, 8, Block::END_BRICKS);
+            $chunk->setBlock(10, 39, 8, Block::SAND);
+            $chunk->setBlock(11, 39, 9, Block::SAND);
+            $chunk->setBlock(10, 39, 9, Block::SAND);
+            $chunk->setBlock(9, 39, 9, Block::END_BRICKS);
+            $chunk->setBlock(10, 39, 10, Block::SAND);
+            $chunk->setBlock(9, 39, 10, Block::GOLD_BLOCK);
+            $chunk->setBlock(9, 39, 11, Block::SAND);
+            $chunk->setBlock(8, 39, 10, Block::SAND);
+            $chunk->setBlock(8, 39, 9, Block::SAND);
+            $chunk->setBlock(7, 39, 10, Block::SAND);
+            $chunk->setBlock(8, 39, 11, Block::SANDSTONE);
+            $chunk->setBlock(7, 39, 5, Block::END_BRICKS);
+            $chunk->setBlock(6, 39, 8, Block::END_BRICKS);
+            $chunk->setBlock(6, 39, 5, Block::SAND);
+            $chunk->setBlock(6, 39, 6, Block::SAND);
+            $chunk->setBlock(6, 39, 7, Block::SAND);
+            $chunk->setBlock(5, 39, 7, Block::SAND);
+            $chunk->setBlock(5, 39, 8, Block::SAND);
+            $chunk->setBlock(5, 39, 9, Block::SAND);
+            $chunk->setBlock(6, 39, 9, Block::SAND);
+            $chunk->setBlock(6, 39, 10, Block::SAND);
+            $chunk->setBlock(7, 39, 8, Block::SAND);
+            $chunk->setBlock(7, 39, 10, Block::SAND);
+            $chunk->setBlock(7, 39, 9, Block::SANDSTONE);
+            $chunk->setBlock(7, 39, 7, Block::WATER);
+            $chunk->setBlock(7, 39, 6, Block::WATER);
+            $chunk->setBlock(8, 39, 8, Block::WATER);
+            $chunk->setBlock(8, 39, 7, Block::WATER);
+            $chunk->setBlock(8, 39, 6, Block::WATER);
+            $chunk->setBlock(8, 39, 5, Block::WATER);
+            $chunk->setBlock(9, 39, 8, Block::WATER);
+            $chunk->setBlock(9, 39, 7, Block::WATER);
+            $chunk->setBlock(10, 39, 7, Block::WATER);
+            $chunk->setBlock(9, 39, 6, Block::WATER);
+            $chunk->setBlock(9, 39, 5, Block::WATER);
+            $chunk->setBlock(10, 38, 11, Block::SANDSTONE);
+            $chunk->setBlock(9, 38, 11, Block::SANDSTONE);
+            $chunk->setBlock(8, 38, 11, Block::SANDSTONE);
+            $chunk->setBlock(7, 38, 11, Block::SANDSTONE);
+            $chunk->setBlock(11, 38, 10, Block::SANDSTONE);
+            $chunk->setBlock(10, 38, 10, Block::SANDSTONE);
+            $chunk->setBlock(9, 38, 10, Block::SANDSTONE);
+            $chunk->setBlock(8, 38, 10, Block::SANDSTONE);
+            $chunk->setBlock(7, 38, 10, Block::SANDSTONE);
+            $chunk->setBlock(6, 38, 10, Block::SANDSTONE);
+            $chunk->setBlock(11, 38, 9, Block::SANDSTONE);
+            $chunk->setBlock(10, 38, 9, Block::SANDSTONE);
+            $chunk->setBlock(9, 38, 9, Block::SANDSTONE);
+            $chunk->setBlock(8, 38, 9, Block::SANDSTONE);
+            $chunk->setBlock(7, 38, 9, Block::SANDSTONE);
+            $chunk->setBlock(6, 38, 9, Block::SANDSTONE);
+            $chunk->setBlock(5, 38, 9, Block::SANDSTONE);
+            $chunk->setBlock(11, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(10, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(9, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(8, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(7, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(6, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(5, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(11, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(10, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(9, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(8, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(7, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(6, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(5, 38, 8, Block::SANDSTONE);
+            $chunk->setBlock(11, 38, 7, Block::SANDSTONE);
+            $chunk->setBlock(10, 38, 7, Block::SANDSTONE);
+            $chunk->setBlock(9, 38, 7, Block::WATER);
+            $chunk->setBlock(8, 38, 7, Block::WATER);
+            $chunk->setBlock(7, 38, 7, Block::SANDSTONE);
+            $chunk->setBlock(6, 38, 7, Block::SANDSTONE);
+            $chunk->setBlock(5, 38, 7, Block::SANDSTONE);
+            $chunk->setBlock(11, 38, 6, Block::SANDSTONE);
+            $chunk->setBlock(10, 38, 6, Block::SANDSTONE);
+            $chunk->setBlock(9, 38, 6, Block::WATER);
+            $chunk->setBlock(8, 38, 6, Block::WATER);
+            $chunk->setBlock(7, 38, 6, Block::SANDSTONE);
+            $chunk->setBlock(6, 38, 6, Block::SANDSTONE);
+            $chunk->setBlock(5, 38, 6, Block::SANDSTONE);
+            $chunk->setBlock(10, 38, 5, Block::SANDSTONE);
+            $chunk->setBlock(9, 38, 5, Block::SANDSTONE);
+            $chunk->setBlock(8, 38, 5, Block::WATER);
+            $chunk->setBlock(7, 38, 5, Block::SANDSTONE);
+            $chunk->setBlock(6, 38, 5, Block::SANDSTONE);
+            $chunk->setBlock(9, 38, 4, Block::SANDSTONE);
+            $chunk->setBlock(8, 38, 4, Block::SANDSTONE);
+            $chunk->setBlock(7, 38, 4, Block::SANDSTONE);
+            $chunk->setBlock(10, 37, 11, Block::SANDSTONE);
+            $chunk->setBlock(8, 37, 11, Block::SANDSTONE);
+            $chunk->setBlock(7, 37, 11, Block::SANDSTONE);
+            $chunk->setBlock(10, 37, 10, Block::SANDSTONE);
+            $chunk->setBlock(9, 37, 10, Block::SANDSTONE);
+            $chunk->setBlock(8, 37, 10, Block::SANDSTONE);
+            $chunk->setBlock(7, 37, 10, Block::SANDSTONE);
+            $chunk->setBlock(6, 37, 10, Block::SANDSTONE);
+            $chunk->setBlock(11, 37, 8, Block::SANDSTONE);
+            $chunk->setBlock(10, 37, 8, Block::SANDSTONE);
+            $chunk->setBlock(9, 37, 8, Block::SANDSTONE);
+            $chunk->setBlock(8, 37, 8, Block::SANDSTONE);
+            $chunk->setBlock(7, 37, 8, Block::SANDSTONE);
+            $chunk->setBlock(6, 37, 8, Block::SANDSTONE);
+            $chunk->setBlock(5, 37, 8, Block::SANDSTONE);
+            $chunk->setBlock(10, 37, 9, Block::SANDSTONE);
+            $chunk->setBlock(9, 37, 9, Block::SANDSTONE);
+            $chunk->setBlock(8, 37, 9, Block::SANDSTONE);
+            $chunk->setBlock(7, 37, 9, Block::SANDSTONE);
+            $chunk->setBlock(6, 37, 9, Block::SANDSTONE);
+            $chunk->setBlock(11, 37, 7, Block::SANDSTONE);
+            $chunk->setBlock(10, 37, 7, Block::SANDSTONE);
+            $chunk->setBlock(9, 37, 7, Block::SANDSTONE);
+            $chunk->setBlock(8, 37, 7, Block::SANDSTONE);
+            $chunk->setBlock(7, 37, 7, Block::SANDSTONE);
+            $chunk->setBlock(6, 37, 7, Block::SANDSTONE);
+            $chunk->setBlock(5, 37, 7, Block::SANDSTONE);
+            $chunk->setBlock(10, 37, 7, Block::SANDSTONE);
+            $chunk->setBlock(10, 37, 6, Block::SANDSTONE);
+            $chunk->setBlock(9, 37, 6, Block::SANDSTONE);
+            $chunk->setBlock(8, 37, 6, Block::SANDSTONE);
+            $chunk->setBlock(7, 37, 6, Block::SANDSTONE);
+            $chunk->setBlock(6, 37, 6, Block::SANDSTONE);
+            $chunk->setBlock(9, 37, 5, Block::SANDSTONE);
+            $chunk->setBlock(8, 37, 5, Block::SANDSTONE);
+            $chunk->setBlock(7, 37, 5, Block::SANDSTONE);
+            $chunk->setBlock(8, 36, 11, Block::SANDSTONE);
+            $chunk->setBlock(10, 36, 10, Block::SANDSTONE);
+            $chunk->setBlock(9, 36, 10, Block::STONE);
+            $chunk->setBlock(8, 36, 10, Block::STONE);
+            $chunk->setBlock(7, 36, 10, Block::STONE);
+            $chunk->setBlock(6, 36, 10, Block::SANDSTONE);
+            $chunk->setBlock(10, 36, 9, Block::STONE);
+            $chunk->setBlock(9, 36, 9, Block::STONE);
+            $chunk->setBlock(8, 36, 9, Block::STONE);
+            $chunk->setBlock(7, 36, 9, Block::STONE);
+            $chunk->setBlock(6, 36, 9, Block::STONE);
+            $chunk->setBlock(11, 36, 8, Block::SANDSTONE);
+            $chunk->setBlock(10, 36, 8, Block::STONE);
+            $chunk->setBlock(9, 36, 8, Block::STONE);
+            $chunk->setBlock(8, 36, 8, Block::SANDSTONE);
+            $chunk->setBlock(7, 36, 8, Block::STONE);
+            $chunk->setBlock(6, 36, 8, Block::STONE);
+            $chunk->setBlock(5, 36, 8, Block::SANDSTONE);
+            $chunk->setBlock(10, 36, 7, Block::STONE);
+            $chunk->setBlock(9, 36, 7, Block::SANDSTONE);
+            $chunk->setBlock(8, 36, 7, Block::SANDSTONE);
+            $chunk->setBlock(7, 36, 7, Block::STONE);
+            $chunk->setBlock(6, 36, 7, Block::STONE);
+            $chunk->setBlock(10, 36, 6, Block::SANDSTONE);
+            $chunk->setBlock(9, 36, 6, Block::STONE);
+            $chunk->setBlock(8, 36, 6, Block::STONE);
+            $chunk->setBlock(7, 36, 6, Block::COBBLESTONE);
+            $chunk->setBlock(6, 36, 6, Block::SANDSTONE);
+            $chunk->setBlock(9, 36, 5, Block::SANDSTONE);
+            $chunk->setBlock(8, 36, 5, Block::SANDSTONE);
+            $chunk->setBlock(8, 35, 10, Block::COBBLESTONE);
+            $chunk->setBlock(9, 35, 9, Block::STONE);
+            $chunk->setBlock(8, 35, 9, Block::STONE);
+            $chunk->setBlock(7, 35, 9, Block::STONE);
+            $chunk->setBlock(6, 35, 9, Block::STONE);
+            $chunk->setBlock(10, 35, 8, Block::STONE);
+            $chunk->setBlock(9, 35, 8, Block::STONE);
+            $chunk->setBlock(8, 35, 8, Block::STONE);
+            $chunk->setBlock(7, 35, 8, Block::STONE);
+            $chunk->setBlock(6, 35, 8, Block::COBBLESTONE);
+            $chunk->setBlock(5, 35, 8, Block::SANDSTONE);
+            $chunk->setBlock(9, 35, 7, Block::STONE);
+            $chunk->setBlock(8, 35, 7, Block::STONE);
+            $chunk->setBlock(7, 35, 7, Block::STONE);
+            $chunk->setBlock(8, 35, 6, Block::STONE);
+            $chunk->setBlock(9, 34, 9, Block::STONE);
+            $chunk->setBlock(8, 34, 9, Block::COBBLESTONE);
+            $chunk->setBlock(7, 34, 9, Block::STONE);
+            $chunk->setBlock(9, 34, 8, Block::COBBLESTONE);
+            $chunk->setBlock(8, 34, 8, Block::STONE);
+            $chunk->setBlock(7, 34, 8, Block::COBBLESTONE);
+            $chunk->setBlock(6, 34, 8, Block::COBBLESTONE);
+            $chunk->setBlock(8, 34, 7, Block::COBBLESTONE);
+            $chunk->setBlock(8, 33, 9, Block::STONE);
+            $chunk->setBlock(8, 33, 8, Block::STONE);
+            $chunk->setBlock(9, 33, 8, Block::COBBLESTONE);
+            $chunk->setBlock(7, 33, 8, Block::STONE);
+            $chunk->setBlock(8, 33, 7, Block::STONE);
+            $chunk->setBlock(8, 32, 9, Block::STONE);
+            $chunk->setBlock(8, 32, 8, Block::STONE);
+            $chunk->setBlock(9, 32, 8, Block::STONE);
+            $chunk->setBlock(8, 31, 8, Block::COBBLESTONE);
+            $chunk->setBlock(8, 30, 8, Block::STONE);
+            $chunk->setBlock(8, 29, 8, Block::STONE);
+            $chunk->setBlock(7, 40, 8, Block::CHEST);
+            $chunk->setBlock(5, 47, 5, Block::LEAVES, 15);
+            $chunk->setBlock(5, 47, 6, Block::LEAVES, 15);
+            $chunk->setBlock(6, 47, 6, Block::LEAVES, 15);
+            $chunk->setBlock(6, 47, 7, Block::LEAVES, 15);
+            $chunk->setBlock(6, 47, 8, Block::LEAVES, 15);
+            $chunk->setBlock(6, 47, 7, Block::LEAVES, 15);
+            $chunk->setBlock(8, 47, 6, Block::LEAVES, 15);
+            $chunk->setBlock(9, 47, 6, Block::LEAVES, 15);
+            $chunk->setBlock(10, 47, 6, Block::LEAVES, 15);
+            $chunk->setBlock(10, 47, 5, Block::LEAVES, 15);
+            $chunk->setBlock(11, 47, 5, Block::LEAVES, 15);
+            $chunk->setBlock(7, 47, 7, Block::LEAVES, 15);
+            $chunk->setBlock(7, 47, 8, Block::LEAVES, 15);
+            $chunk->setBlock(6, 47, 7, Block::LEAVES, 15);
+            $chunk->setBlock(8, 47, 7, Block::LEAVES, 15);
+            $chunk->setBlock(9, 47, 7, Block::LEAVES, 15);
+            $chunk->setBlock(8, 47, 8, Block::LEAVES, 15);
+            $chunk->setBlock(7, 47, 9, Block::LEAVES, 15);
+            $chunk->setBlock(8, 47, 9, Block::LEAVES, 15);
+            $chunk->setBlock(9, 47, 8, Block::LEAVES, 15);
+            $chunk->setBlock(10, 47, 8, Block::LEAVES, 15);
+            $chunk->setBlock(9, 47, 9, Block::LEAVES, 15);
+            $chunk->setBlock(10, 47, 9, Block::LEAVES, 15);
+            $chunk->setBlock(10, 47, 10, Block::LEAVES, 15);
+            $chunk->setBlock(6, 47, 10, Block::LEAVES, 15);
+            $chunk->setBlock(7, 47, 10, Block::LEAVES, 15);
+            $chunk->setBlock(8, 47, 10, Block::LEAVES, 15);
+            $chunk->setBlock(11, 47, 10, Block::LEAVES, 15);
+            $chunk->setBlock(11, 47, 11, Block::LEAVES, 15);
+            $chunk->setBlock(12, 46, 4, Block::LEAVES, 15);
+            $chunk->setBlock(12, 46, 4, Block::LEAVES, 15);
+            $chunk->setBlock(11, 46, 4, Block::LEAVES, 15);
+            $chunk->setBlock(11, 46, 5, Block::LEAVES, 15);
+            $chunk->setBlock(8, 46, 3, Block::LEAVES, 15);
+            $chunk->setBlock(8, 46, 4, Block::LEAVES, 15);
+            $chunk->setBlock(8, 46, 5, Block::LEAVES, 15);
+            $chunk->setBlock(8, 46, 6, Block::LEAVES, 15);
+            $chunk->setBlock(4, 46, 4, Block::LEAVES, 15);
+            $chunk->setBlock(4, 46, 5, Block::LEAVES, 15);
+            $chunk->setBlock(5, 46, 5, Block::LEAVES, 15);
+            $chunk->setBlock(4, 46, 8, Block::LEAVES, 15);
+            $chunk->setBlock(5, 46, 8, Block::LEAVES, 15);
+            $chunk->setBlock(6, 46, 8, Block::LEAVES, 15);
+            $chunk->setBlock(5, 46, 11, Block::LEAVES, 15);
+            $chunk->setBlock(5, 46, 10, Block::LEAVES, 15);
+            $chunk->setBlock(6, 46, 10, Block::LEAVES, 15);
+            $chunk->setBlock(8, 46, 12, Block::LEAVES, 15);
+            $chunk->setBlock(8, 46, 11, Block::LEAVES, 15);
+            $chunk->setBlock(8, 46, 10, Block::LEAVES, 15);
+            $chunk->setBlock(12, 46, 12, Block::LEAVES, 15);
+            $chunk->setBlock(12, 46, 4, Block::LEAVES, 15);
+            $chunk->setBlock(12, 46, 11, Block::LEAVES, 15);
+            $chunk->setBlock(11, 46, 11, Block::LEAVES, 15);
+            $chunk->setBlock(12, 46, 12, Block::LEAVES, 15);
+            $chunk->setBlock(12, 46, 8, Block::LEAVES, 15);
+            $chunk->setBlock(11, 46, 8, Block::LEAVES, 15);
+            $chunk->setBlock(10, 46, 8, Block::LEAVES, 15);
+            $chunk->setBlock(8, 46, 8, Block::LOG, 15);
+            $chunk->setBlock(12, 45, 4, Block::LEAVES, 15);
+            $chunk->setBlock(8, 45, 2, Block::LEAVES, 15);
+            $chunk->setBlock(8, 45, 3, Block::LEAVES, 15);
+            $chunk->setBlock(4, 45, 4, Block::LEAVES, 15);
+            $chunk->setBlock(3, 45, 8, Block::LEAVES, 15);
+            $chunk->setBlock(4, 45, 8, Block::LEAVES, 15);
+            $chunk->setBlock(5, 45, 11, Block::LEAVES, 15);
+            $chunk->setBlock(8, 45, 12, Block::LEAVES, 15);
+            $chunk->setBlock(12, 45, 12, Block::LEAVES, 15);
+            $chunk->setBlock(13, 45, 8, Block::LEAVES, 15);
+            $chunk->setBlock(13, 45, 8, Block::LEAVES, 15);
+            $chunk->setBlock(12, 45, 8, Block::LEAVES, 15);
+            $chunk->setBlock(7, 45, 8, Block::LOG, 15);
+            $chunk->setBlock(8, 44, 2, Block::LEAVES, 15);
+            $chunk->setBlock(3, 44, 8, Block::LEAVES, 15);
+            $chunk->setBlock(8, 44, 12, Block::LEAVES, 15);
+            $chunk->setBlock(7, 44, 7, Block::LOG, 15);
+            $chunk->setBlock(6, 43, 7, Block::LOG, 15);
+            $chunk->setBlock(6, 42, 7, Block::LOG, 15);
+            $chunk->setBlock(6, 41, 8, Block::LOG, 15);
+            $chunk->setBlock(6, 40, 8, Block::LOG, 15);
+            $chunk->setX($chunkX);
+            $chunk->setZ($chunkZ);
+            $this->level->setChunk($chunkX, $chunkZ, $chunk);
+        }
+    }
+    
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function populateChunk(int $chunkX, int $chunkZ): void {}
+    
+    /**
+     * @return Vector3
+     */
+    public static function getWorldSpawn() : Vector3 {
+        return new Vector3(9, 40, 11);
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public static function getChestPosition(): Vector3 {
+        return new Vector3(7, 40, 8);
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public function getSpawn() : Vector3 {
+        return new Vector3(9, 40, 11);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\generator\presets;
+
+use pocketmine\block\Block;
+use pocketmine\math\Vector3;
+use room17\SkyBlock\generator\IsleGenerator;
+
+class LostIsland extends IsleGenerator {
+
+    /**
+     * Return generator name
+     *
+     * @return string
+     */
+    public function getName() : string {
+        return "Lost";
+    }
+    
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function generateChunk(int $chunkX, int $chunkZ): void {
+        $chunk = $this->level->getChunk($chunkX, $chunkZ);
+        $chunk->setGenerated();
+        if($chunkX == 0 && $chunkZ == 0) {
+            $chunk->setBlock(11, 34, 9, Block::GRASS);
+            $chunk->setBlock(11, 35, 9, Block::FENCE);
+            $chunk->setBlock(11, 32, 8, Block::DIRT);
+            $chunk->setBlock(11, 33, 8, Block::DIRT);
+            $chunk->setBlock(11, 34, 8, Block::GRASS);
+            $chunk->setBlock(11, 35, 8, Block::FENCE);
+            $chunk->setBlock(11, 33, 7, Block::DIRT);
+            $chunk->setBlock(11, 34, 7, Block::GRASS);
+            $chunk->setBlock(11, 35, 7, Block::FENCE);
+            $chunk->setBlock(10, 33, 10, Block::DIRT);
+            $chunk->setBlock(10, 34, 10, Block::ICE);
+            $chunk->setBlock(10, 32, 9, Block::STONE);
+            $chunk->setBlock(10, 33, 9, Block::DIRT);
+            $chunk->setBlock(10, 34, 9, Block::COBBLESTONE);
+            $chunk->setBlock(10, 31, 8, Block::STONE);
+            $chunk->setBlock(10, 32, 8, Block::STONE);
+            $chunk->setBlock(10, 33, 8, Block::DIRT);
+            $chunk->setBlock(10, 34, 8, Block::SAND);
+            $chunk->setBlock(10, 32, 7, Block::STONE);
+            $chunk->setBlock(10, 33, 7, Block::DIRT);
+            $chunk->setBlock(10, 34, 7, Block::GRAVEL);
+            $chunk->setBlock(10, 35, 7, Block::FENCE);
+            $chunk->setBlock(10, 33, 6, Block::DIRT);
+            $chunk->setBlock(10, 34, 6, Block::GRASS);
+            $chunk->setBlock(10, 35, 6, Block::FENCE);
+            $chunk->setBlock(9, 34, 11, Block::GRASS);
+            $chunk->setBlock(9, 32, 10, Block::STONE);
+            $chunk->setBlock(9, 33, 10, Block::DIRT);
+            $chunk->setBlock(9, 34, 10, Block::ICE);
+            $chunk->setBlock(9, 31, 9, Block::STONE);
+            $chunk->setBlock(9, 32, 9, Block::STONE);
+            $chunk->setBlock(9, 33, 9, Block::DIRT);
+            $chunk->setBlock(9, 34, 9, Block::ICE);
+            $chunk->setBlock(9, 30, 8, Block::STONE);
+            $chunk->setBlock(9, 31, 8, Block::STONE);
+            $chunk->setBlock(9, 32, 8, Block::STONE);
+            $chunk->setBlock(9, 33, 8, Block::DIRT);
+            $chunk->setBlock(9, 34, 8, Block::GRAVEL);
+            $chunk->setBlock(9, 31, 7, Block::STONE);
+            $chunk->setBlock(9, 32, 7, Block::STONE);
+            $chunk->setBlock(9, 33, 7, Block::DIRT);
+            $chunk->setBlock(9, 34, 7, Block::COBBLESTONE);
+            $chunk->setBlock(9, 32, 6, Block::STONE);
+            $chunk->setBlock(9, 33, 6, Block::DIRT);
+            $chunk->setBlock(9, 34, 6, Block::GRAVEL);
+            $chunk->setBlock(9, 35, 6, Block::FENCE);
+            $chunk->setBlock(9, 33, 5, Block::DIRT);
+            $chunk->setBlock(9, 34, 5, Block::GRASS);
+            $chunk->setBlock(8, 32, 11, Block::DIRT);
+            $chunk->setBlock(8, 33, 11, Block::DIRT);
+            $chunk->setBlock(8, 34, 11, Block::GRASS);
+            $chunk->setBlock(8, 31, 10, Block::STONE);
+            $chunk->setBlock(8, 32, 10, Block::STONE);
+            $chunk->setBlock(8, 33, 10, Block::DIRT);
+            $chunk->setBlock(8, 34, 10, Block::ICE);
+            $chunk->setBlock(8, 30, 9, Block::STONE);
+            $chunk->setBlock(8, 31, 9, Block::STONE);
+            $chunk->setBlock(8, 32, 9, Block::STONE);
+            $chunk->setBlock(8, 33, 9, Block::DIRT);
+            $chunk->setBlock(8, 34, 9, Block::ICE);
+            $chunk->setBlock(8, 30, 8, Block::STONE);
+            $chunk->setBlock(8, 31, 8, Block::STONE);
+            $chunk->setBlock(8, 32, 8, Block::STONE);
+            $chunk->setBlock(8, 33, 8, Block::DIRT);
+            $chunk->setBlock(8, 34, 8, Block::ICE);
+            $chunk->setBlock(8, 30, 7, Block::STONE);
+            $chunk->setBlock(8, 31, 7, Block::STONE);
+            $chunk->setBlock(8, 32, 7, Block::STONE);
+            $chunk->setBlock(8, 33, 7, Block::DIRT);
+            $chunk->setBlock(8, 34, 7, Block::GRAVEL);
+            $chunk->setBlock(8, 31, 6, Block::STONE);
+            $chunk->setBlock(8, 32, 6, Block::STONE);
+            $chunk->setBlock(8, 33, 6, Block::DIRT);
+            $chunk->setBlock(8, 34, 6, Block::SAND);
+            $chunk->setBlock(8, 32, 5, Block::DIRT);
+            $chunk->setBlock(8, 33, 5, Block::DIRT);
+            $chunk->setBlock(8, 34, 5, Block::GRAVEL);
+            $chunk->setBlock(7, 33, 11, Block::DIRT);
+            $chunk->setBlock(7, 34, 11, Block::GRASS);
+            $chunk->setBlock(7, 32, 10, Block::STONE);
+            $chunk->setBlock(7, 33, 10, Block::DIRT);
+            $chunk->setBlock(7, 34, 10, Block::GRASS);
+            $chunk->setBlock(7, 31, 9, Block::STONE);
+            $chunk->setBlock(7, 32, 9, Block::STONE);
+            $chunk->setBlock(7, 33, 9, Block::DIRT);
+            $chunk->setBlock(7, 34, 9, Block::ICE);
+            $chunk->setBlock(7, 30, 8, Block::STONE);
+            $chunk->setBlock(7, 31, 8, Block::STONE);
+            $chunk->setBlock(7, 32, 8, Block::STONE);
+            $chunk->setBlock(7, 33, 8, Block::DIRT);
+            $chunk->setBlock(7, 34, 8, Block::ICE);
+            $chunk->setBlock(7, 33, 8, Block::DIRT);
+            $chunk->setBlock(7, 31, 7, Block::STONE);
+            $chunk->setBlock(7, 32, 7, Block::STONE);
+            $chunk->setBlock(7, 33, 7, Block::DIRT);
+            $chunk->setBlock(7, 34, 7, Block::COBBLESTONE);
+            $chunk->setBlock(7, 32, 6, Block::STONE);
+            $chunk->setBlock(7, 33, 6, Block::DIRT);
+            $chunk->setBlock(7, 34, 6, Block::GRAVEL);
+            $chunk->setBlock(7, 34, 5, Block::GRASS);
+            $chunk->setBlock(6, 32, 10, Block::DIRT);
+            $chunk->setBlock(6, 33, 10, Block::DIRT);
+            $chunk->setBlock(6, 34, 10, Block::GRASS);
+            $chunk->setBlock(6, 32, 9, Block::STONE);
+            $chunk->setBlock(6, 33, 9, Block::DIRT);
+            $chunk->setBlock(6, 34, 9, Block::GRASS);
+            $chunk->setBlock(6, 31, 8, Block::STONE);
+            $chunk->setBlock(6, 32, 8, Block::STONE);
+            $chunk->setBlock(6, 33, 8, Block::DIRT);
+            $chunk->setBlock(6, 34, 8, Block::DIRT);
+            $chunk->setBlock(6, 35, 8, Block::HAY_BALE);
+            $chunk->setBlock(6, 32, 7, Block::STONE);
+            $chunk->setBlock(6, 33, 7, Block::DIRT);
+            $chunk->setBlock(6, 34, 7, Block::SAND);
+            $chunk->setBlock(6, 32, 6, Block::DIRT);
+            $chunk->setBlock(6, 33, 6, Block::DIRT);
+            $chunk->setBlock(6, 34, 6, Block::GRASS);
+            $chunk->setBlock(5, 33, 9, Block::DIRT);
+            $chunk->setBlock(5, 34, 9, Block::DIRT);
+            $chunk->setBlock(5, 35, 9, Block::HAY_BALE);
+            $chunk->setBlock(5, 32, 8, Block::DIRT);
+            $chunk->setBlock(5, 33, 8, Block::DIRT);
+            $chunk->setBlock(5, 34, 8, Block::DIRT);
+            $chunk->setBlock(5, 35, 8, Block::HAY_BALE);
+            $chunk->setBlock(5, 36, 8, Block::HAY_BALE);
+            $chunk->setBlock(5, 33, 7, Block::DIRT);
+            $chunk->setBlock(5, 34, 7, Block::DIRT);
+            $chunk->setBlock(5, 35, 7, Block::LOG);
+            $chunk->setBlock(5, 36, 7, Block::LOG);
+            $chunk->setBlock(5, 37, 7, Block::LOG);
+            $chunk->setBlock(5, 38, 7, Block::LOG);
+            $chunk->setBlock(5, 39, 7, Block::LOG);
+            $chunk->setBlock(5, 40, 7, Block::LOG);
+            $chunk->setBlock(5, 41, 7, Block::LEAVES);
+            $chunk->setBlock(5, 38, 6, Block::LEAVES);
+            $chunk->setBlock(5, 39, 6, Block::LEAVES);
+            $chunk->setBlock(5, 40, 6, Block::LEAVES);
+            $chunk->setBlock(5, 41, 6, Block::LEAVES);
+            $chunk->setBlock(6, 38, 7, Block::LEAVES);
+            $chunk->setBlock(6, 39, 7, Block::LEAVES);
+            $chunk->setBlock(6, 40, 7, Block::LEAVES);
+            $chunk->setBlock(6, 41, 7, Block::LEAVES);
+            $chunk->setBlock(5, 38, 8, Block::LEAVES);
+            $chunk->setBlock(5, 39, 8, Block::LEAVES);
+            $chunk->setBlock(5, 40, 8, Block::LEAVES);
+            $chunk->setBlock(5, 41, 8, Block::LEAVES);
+            $chunk->setBlock(4, 38, 7, Block::LEAVES);
+            $chunk->setBlock(5, 39, 8, Block::LEAVES);
+            $chunk->setBlock(5, 40, 8, Block::LEAVES);
+            $chunk->setBlock(5, 41, 8, Block::LEAVES);
+            $chunk->setBlock(7, 38, 7, Block::LEAVES);
+            $chunk->setBlock(7, 39, 7, Block::LEAVES);
+            $chunk->setBlock(7, 40, 7, Block::LEAVES);
+            $chunk->setBlock(6, 38, 8, Block::LEAVES);
+            $chunk->setBlock(6, 39, 8, Block::LEAVES);
+            $chunk->setBlock(6, 40, 8, Block::LEAVES);
+            $chunk->setBlock(5, 38, 9, Block::LEAVES);
+            $chunk->setBlock(5, 39, 9, Block::LEAVES);
+            $chunk->setBlock(5, 40, 9, Block::LEAVES);
+            $chunk->setBlock(4, 38, 8, Block::LEAVES);
+            $chunk->setBlock(4, 39, 8, Block::LEAVES);
+            $chunk->setBlock(4, 40, 8, Block::LEAVES);
+            $chunk->setBlock(3, 38, 7, Block::LEAVES);
+            $chunk->setBlock(3, 39, 7, Block::LEAVES);
+            $chunk->setBlock(3, 40, 7, Block::LEAVES);
+            $chunk->setBlock(4, 38, 6, Block::LEAVES);
+            $chunk->setBlock(4, 39, 6, Block::LEAVES);
+            $chunk->setBlock(4, 40, 6, Block::LEAVES);
+            $chunk->setBlock(5, 38, 5, Block::LEAVES);
+            $chunk->setBlock(5, 39, 5, Block::LEAVES);
+            $chunk->setBlock(5, 40, 5, Block::LEAVES);
+            $chunk->setBlock(6, 38, 6, Block::LEAVES);
+            $chunk->setBlock(6, 39, 6, Block::LEAVES);
+            $chunk->setBlock(6, 40, 6, Block::LEAVES);
+            $chunk->setBlock(7, 39, 8, Block::LEAVES);
+            $chunk->setBlock(7, 38, 6, Block::LEAVES);
+            $chunk->setBlock(6, 39, 5, Block::LEAVES);
+            $chunk->setBlock(4, 38, 5, Block::LEAVES);
+            $chunk->setBlock(4, 39, 5, Block::LEAVES);
+            $chunk->setBlock(3, 38, 6, Block::LEAVES);
+            $chunk->setBlock(3, 39, 8, Block::LEAVES);
+            $chunk->setBlock(4, 39, 9, Block::LEAVES);
+            $chunk->setBlock(6, 38, 9, Block::LEAVES);
+            $chunk->setBlock(4, 39, 7, Block::LEAVES);
+            $chunk->setBlock(4, 40, 7, Block::LEAVES);
+            $chunk->setBlock(4, 41, 7, Block::LEAVES);
+            $chunk->setBlock(6, 35, 9, Block::CHEST);
+            $chunk->setX($chunkX);
+            $chunk->setZ($chunkZ);
+            $this->level->setChunk($chunkX, $chunkZ, $chunk);
+        }
+    }
+    
+    /**
+     * @param int $chunkX
+     * @param int $chunkZ
+     */
+    public function populateChunk(int $chunkX, int $chunkZ): void {}
+    
+    /**
+     * @return Vector3
+     */
+    public static function getWorldSpawn() : Vector3 {
+        return new Vector3(10, 35, 9);
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public static function getChestPosition(): Vector3 {
+        return new Vector3(6, 35, 9);
+    }
+    
+    /**
+     * @return Vector3
+     */
+    public function getSpawn() : Vector3 {
+        return new Vector3(10, 35, 9);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command;
+
+
+use pocketmine\command\Command;
+use pocketmine\command\CommandSender;
+use pocketmine\command\PluginIdentifiableCommand;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+use room17\SkyBlock\command\presets\AcceptCommand;
+use room17\SkyBlock\command\presets\BlocksCommand;
+use room17\SkyBlock\command\presets\CategoryCommand;
+use room17\SkyBlock\command\presets\ChatCommand;
+use room17\SkyBlock\command\presets\CooperateCommand;
+use room17\SkyBlock\command\presets\CreateCommand;
+use room17\SkyBlock\command\presets\DemoteCommand;
+use room17\SkyBlock\command\presets\DenyCommand;
+use room17\SkyBlock\command\presets\DisbandCommand;
+use room17\SkyBlock\command\presets\FireCommand;
+use room17\SkyBlock\command\presets\HelpCommand;
+use room17\SkyBlock\command\presets\InviteCommand;
+use room17\SkyBlock\command\presets\JoinCommand;
+use room17\SkyBlock\command\presets\KickCommand;
+use room17\SkyBlock\command\presets\LeaveCommand;
+use room17\SkyBlock\command\presets\LockCommand;
+use room17\SkyBlock\command\presets\MembersCommand;
+use room17\SkyBlock\command\presets\PromoteCommand;
+use room17\SkyBlock\command\presets\SetSpawnCommand;
+use room17\SkyBlock\command\presets\TransferCommand;
+use room17\SkyBlock\command\presets\VisitCommand;
+use room17\SkyBlock\SkyBlock;
+
+class IsleCommandMap extends Command implements PluginIdentifiableCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /** @var IsleCommand[] */
+    private $commands = [];
+    
+    /**
+     * IsleCommandMap constructor.
+     * @param SkyBlock $plugin
+     */
+    public function __construct(SkyBlock $plugin) {
+        $this->plugin = $plugin;
+        $this->registerCommand(new HelpCommand($this));
+        $this->registerCommand(new CreateCommand($this));
+        $this->registerCommand(new JoinCommand());
+        $this->registerCommand(new LockCommand());
+        $this->registerCommand(new ChatCommand());
+        $this->registerCommand(new VisitCommand($this));
+        $this->registerCommand(new LeaveCommand());
+        $this->registerCommand(new MembersCommand());
+        $this->registerCommand(new InviteCommand($this));
+        $this->registerCommand(new AcceptCommand());
+        $this->registerCommand(new DenyCommand());
+        $this->registerCommand(new DisbandCommand($this));
+        $this->registerCommand(new KickCommand($this));
+        $this->registerCommand(new FireCommand($this));
+        $this->registerCommand(new PromoteCommand($this));
+        $this->registerCommand(new DemoteCommand($this));
+        $this->registerCommand(new SetSpawnCommand());
+        $this->registerCommand(new TransferCommand($this));
+        $this->registerCommand(new CategoryCommand());
+        $this->registerCommand(new BlocksCommand());
+        $this->registerCommand(new CooperateCommand($this));
+        parent::__construct("isle", "SkyBlock command", "Usage: /is", [
+            "island",
+            "is",
+            "isle",
+            "sb",
+            "skyblock"
+        ]);
+        $plugin->getServer()->getCommandMap()->register("skyblock", $this);
+    }
+    
+    /**
+     * @return SkyBlock|Plugin
+     */
+    public function getPlugin(): Plugin {
+        return $this->plugin;
+    }
+    
+    /**
+     * @return IsleCommand[]
+     */
+    public function getCommands(): array {
+        return $this->commands;
+    }
+    
+    /**
+     * @param string $alias
+     * @return null|IsleCommand
+     */
+    public function getCommand(string $alias): ?IsleCommand {
+        foreach($this->commands as $key => $command) {
+            if(in_array(strtolower($alias), $command->getAliases()) or $alias == $command->getName()) {
+                return $command;
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * @param IsleCommand $command
+     */
+    public function registerCommand(IsleCommand $command) {
+        $this->commands[] = $command;
+    }
+    
+    /**
+     * @param CommandSender $sender
+     * @param string $commandLabel
+     * @param array $args
+     */
+    public function execute(CommandSender $sender, string $commandLabel, array $args): void {
+        if(!$sender instanceof Player) {
+            $sender->sendMessage("Please, run this command in game");
+            return;
+        }
+        
+        $session = $this->plugin->getSessionManager()->getSession($sender);
+        if(isset($args[0]) and $this->getCommand($args[0]) != null) {
+            $this->getCommand(array_shift($args))->onCommand($session, $args);
+        } else {
+            $session->sendTranslatedMessage("TRY_USING_HELP");
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\Session;
+
+class HelpCommand extends IsleCommand {
+    
+    /** @var IsleCommandMap */
+    private $map;
+    
+    /**
+     * HelpCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->map = $map;
+        parent::__construct(["help", "?"], "HELP_USAGE", "HELP_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        $session->sendTranslatedMessage("HELP_HEADER", ["amount" => count($this->map->getCommands())]);
+        foreach($this->map->getCommands() as $command) {
+            $session->sendTranslatedMessage("HELP_COMMAND_TEMPLATE", [
+                "name" => $command->getName(),
+                "description" => $session->translate($command->getDescriptionMessageId()),
+                "usage" => $session->translate($command->getUsageMessageId())
+            ]);
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command;
+
+
+use room17\SkyBlock\session\BaseSession;
+use room17\SkyBlock\session\Session;
+
+abstract class IsleCommand {
+    
+    /** @var string */
+    private $name;
+    
+    /** @var array */
+    private $aliases = [];
+    
+    /** @var string */
+    private $usageMessageId;
+    
+    /** @var string */
+    private $descriptionMessageId;
+    
+    /**
+     * IsleCommand constructor.
+     * @param array $aliases
+     * @param string $usageMessageId
+     * @param string $descriptionMessageId
+     */
+    public function __construct(array $aliases, string $usageMessageId, string $descriptionMessageId) {
+        $this->aliases = array_map("strtolower", $aliases);
+        $this->name = array_shift($this->aliases);
+        $this->usageMessageId = $usageMessageId;
+        $this->descriptionMessageId = $descriptionMessageId;
+    }
+    
+    /**
+     * @return string
+     */
+    public function getName(): string {
+        return $this->name;
+    }
+    
+    /**
+     * @return array
+     */
+    public function getAliases(): array {
+        return $this->aliases;
+    }
+    
+    /**
+     * @return string
+     */
+    public function getUsageMessageId(): string {
+        return $this->usageMessageId;
+    }
+    
+    /**
+     * @return string
+     */
+    public function getDescriptionMessageId(): string {
+        return $this->descriptionMessageId;
+    }
+    
+    /**
+     * @param Session $session
+     * @return bool
+     */
+    public function checkIsle(Session $session): bool {
+        if($session->hasIsle()) {
+            return false;
+        }
+        $session->sendTranslatedMessage("NEED_ISLAND");
+        return true;
+    }
+    
+    /**
+     * @param Session $session
+     * @return bool
+     */
+    public function checkFounder(Session $session): bool {
+        if($this->checkIsle($session)) {
+            return true;
+        } elseif($session->getRank() == BaseSession::RANK_FOUNDER) {
+            return false;
+        }
+        $session->sendTranslatedMessage("MUST_BE_FOUNDER");
+        return true;
+    }
+    
+    /**
+     * @param Session $session
+     * @return bool
+     */
+    public function checkLeader(Session $session): bool {
+        if($this->checkIsle($session)) {
+            return true;
+        } elseif($session->getRank() == BaseSession::RANK_FOUNDER or $session->getRank() == BaseSession::RANK_LEADER) {
+            return false;
+        }
+        $session->sendTranslatedMessage("MUST_BE_LEADER");
+        return true;
+    }
+    
+    /**
+     * @param Session $session
+     * @return bool
+     */
+    public function checkOfficer(Session $session): bool {
+        if($this->checkIsle($session)) {
+            return true;
+        } elseif($session->getRank() != BaseSession::RANK_DEFAULT) {
+            return false;
+        }
+        $session->sendTranslatedMessage("MUST_BE_OFFICER");
+        return true;
+    }
+    
+    /**
+     * @param null|Session $session
+     * @param null|Session $ySession
+     * @return bool
+     */
+    public function checkClone(?Session $session, ?Session $ySession): bool {
+        if($session === $ySession) {
+            $session->sendTranslatedMessage("CANT_BE_YOURSELF");
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * @param Session $session
+     * @param array $args
+     * @return void
+     */
+    public abstract function onCommand(Session $session, array $args): void;
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class CreateCommand extends IsleCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /**
+     * CreateCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->plugin = $map->getPlugin();
+        parent::__construct(["create"], "CREATE_USAGE", "CREATE_DESCRIPTION");
+    }
+
+    /**
+     * @param Session $session
+     * @param array $args
+     * @throws \ReflectionException
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($session->hasIsle()) {
+            $session->sendTranslatedMessage("NEED_TO_BE_FREE");
+            return;
+        }
+        $minutesSinceLastIsle = $session->getLastIslandCreationTime() !== null
+            ? (microtime(true) - $session->getLastIslandCreationTime()) / 60
+            : -1;
+        $cooldownDuration = $this->plugin->getSettings()->getCooldownDuration();
+        if($minutesSinceLastIsle !== -1 and $minutesSinceLastIsle < $cooldownDuration) {
+            $session->sendTranslatedMessage("YOU_HAVE_TO_WAIT", [
+                "minutes" => ceil($cooldownDuration - $minutesSinceLastIsle),
+            ]);
+            return;
+        }
+        $generator = $args[0] ?? "Shelly";
+        if($this->plugin->getGeneratorManager()->isGenerator($generator)) {
+            $this->plugin->getIsleManager()->createIsleFor($session, $generator);
+            $session->sendTranslatedMessage("SUCCESSFULLY_CREATED_A_ISLAND");
+        } else {
+            $session->sendTranslatedMessage("NOT_VALID_GENERATOR", [
+                "name" => $generator
+            ]);
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\Session;
+
+class JoinCommand extends IsleCommand {
+    
+    /**
+     * JoinCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct(["join", "go", "spawn"], "JOIN_USAGE", "JOIN_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkIsle($session)) {
+            return;
+        }
+        $session->getPlayer()->teleport($session->getIsle()->getLevel()->getSpawnLocation());
+        $session->sendTranslatedMessage("TELEPORTED_TO_ISLAND");
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\Session;
+
+class LockCommand extends IsleCommand {
+    
+    /**
+     * LockCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct(["lock"], "LOCK_USAGE", "LOCK_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkLeader($session)) {
+            return;
+        }
+        $isle = $session->getIsle();
+        $isle->setLocked(!$isle->isLocked());
+        $isle->save();
+        $session->sendTranslatedMessage($isle->isLocked() ? "ISLAND_LOCKED" : "ISLAND_UNLOCKED");
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\Session;
+
+class ChatCommand extends IsleCommand {
+    
+    /**
+     * ChatCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct(["chat"], "CHAT_USAGE", "CHAT_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkIsle($session)) {
+            return;
+        }
+        $session->setInChat(!$session->isInChat());
+        $session->sendTranslatedMessage($session->isInChat() ? "JOINED_ISLAND_CHAT" : "JOINED_GLOBAL_CHAT");
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class VisitCommand extends IsleCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /**
+     * VisitCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->plugin = $map->getPlugin();
+        parent::__construct(["visit", "teleport", "tp"], "VISIT_USAGE", "VISIT_DESCRIPTION");
+    }
+
+    /**
+     * @param Session $session
+     * @param array $args
+     * @throws \ReflectionException
+     */
+    public function onCommand(Session $session, array $args): void {
+        if(!isset($args[0])) {
+            $session->sendTranslatedMessage("VISIT_USAGE");
+            return;
+        }
+        $offline = $this->plugin->getSessionManager()->getOfflineSession($args[0]);
+        $isleId = $offline->getIsleId();
+        if($isleId == null) {
+            $session->sendTranslatedMessage("HE_DO_NOT_HAVE_AN_ISLAND", [
+                "name" => $args[0]
+            ]);
+            return;
+        }
+        $this->plugin->getProvider()->loadIsle($isleId);
+        $isle = $this->plugin->getIsleManager()->getIsle($isleId);
+        if($isle->isLocked() and !($session->getPlayer()->isOp())) {
+            $session->sendTranslatedMessage("HIS_ISLAND_IS_LOCKED", [
+                "name" => $args[0]
+            ]);
+            $isle->tryToClose();
+            return;
+        }
+        $session->getPlayer()->teleport($isle->getLevel()->getSpawnLocation());
+        $session->sendTranslatedMessage("VISITING_ISLAND", [
+            "name" => $args[0]
+        ]);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\BaseSession;
+use room17\SkyBlock\session\Session;
+
+class LeaveCommand extends IsleCommand {
+    
+    public function __construct() {
+        parent::__construct(["leave"], "LEAVE_USAGE", "LEAVE_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkIsle($session)) {
+            return;
+        } elseif($session->getRank() == BaseSession::RANK_FOUNDER) {
+            $session->sendTranslatedMessage("FOUNDER_CANNOT_LEAVE");
+            return;
+        }
+        $session->setRank(BaseSession::RANK_DEFAULT);
+        $session->setIsle(null);
+        $session->setInChat(false);
+        $session->sendTranslatedMessage("LEFT_ISLAND");
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\Session;
+
+class MembersCommand extends IsleCommand {
+    
+    /**
+     * MembersCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct(["members"], "MEMBERS_USAGE", "MEMBERS_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkIsle($session)) {
+            return;
+        }
+        $members = $session->getIsle()->getMembers();
+        $session->sendTranslatedMessage("MEMBERS_COMMAND_HEADER", [
+            "amount" => count($members)
+        ]);
+        foreach($members as $member) {
+            $memberSession = $member->getSession();
+            if($memberSession != null) {
+                $session->sendTranslatedMessage("ONLINE_MEMBER", [
+                    "name" => $memberSession->getUsername()
+                ]);
+            } else {
+                $session->sendTranslatedMessage("OFFLINE_MEMBER", [
+                    "name" => $member->getUsername()
+                ]);
+            }
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class InviteCommand extends IsleCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /**
+     * InviteCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->plugin = $map->getPlugin();
+        parent::__construct(["invite", "inv"], "INVITE_USAGE", "INVITE_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkOfficer($session)) {
+            return;
+        } elseif(!isset($args[0])) {
+            $session->sendTranslatedMessage("INVITE_USAGE");
+            return;
+        } elseif(count($session->getIsle()->getMembers()) >= $session->getIsle()->getSlots()) {
+            $isle = $session->getIsle();
+            $next = $isle->getNextCategory();
+            if($next != null) {
+                $session->sendTranslatedMessage("ISLAND_IS_FULL_BUT_YOU_CAN_UPGRADE", [
+                    "next" => $next
+                ]);
+            } else {
+                $session->sendTranslatedMessage("ISLAND_IS_FULL");
+            }
+            return;
+        }
+        $player = $this->plugin->getServer()->getPlayer($args[0]);
+        if($player == null) {
+            $session->sendTranslatedMessage("NOT_ONLINE_PLAYER", [
+                "name" => $args[0]
+            ]);
+            return;
+        }
+        $playerSession = $this->plugin->getSessionManager()->getSession($player);
+        if($this->checkClone($session, $playerSession)) {
+            return;
+        } elseif($playerSession->hasIsle()) {
+            $session->sendTranslatedMessage("CANNOT_INVITE_BECAUSE_HAS_ISLAND", [
+                "name" => $player->getName()
+            ]);
+            return;
+        }
+        $playerSession->addInvitation($session->getUsername(), $session->getIsle());
+        $playerSession->sendTranslatedMessage("YOU_WERE_INVITED_TO_AN_ISLAND", [
+            "name" => $session->getUsername()
+        ]);
+        $session->sendTranslatedMessage("SUCCESSFULLY_INVITED", [
+            "name" => $player->getName()
+        ]);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\BaseSession;
+use room17\SkyBlock\session\Session;
+
+class AcceptCommand extends IsleCommand {
+    
+    /**
+     * AcceptCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct(["accept", "acc"], "ACCEPT_USAGE", "ACCEPT_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($session->hasIsle()) {
+            $session->sendTranslatedMessage("NEED_TO_BE_FREE");
+            return;
+        } elseif(!isset($args[0]) and !$session->hasLastInvitation()) {
+            $session->sendTranslatedMessage("ACCEPT_USAGE");
+            return;
+        }
+        $isle = $session->getInvitation($invitation = $args[0] ?? $session->getLastInvitation());
+        if($isle == null) {
+            return;
+        }
+        $session->setLastInvitation(null);
+        $session->removeInvitation($invitation);
+        $session->setRank(BaseSession::RANK_DEFAULT);
+        $session->setIsle($isle);
+        $isle->broadcastTranslatedMessage("PLAYER_JOINED_THE_ISLAND", [
+            "name" => $session->getUsername()
+        ]);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\Session;
+
+class DenyCommand extends IsleCommand {
+    
+    /**
+     * DenyCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct(["deny", "d"], "DENY_USAGE", "DENY_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if(!isset($args[0]) and !$session->hasLastInvitation()) {
+            $session->sendTranslatedMessage("DENY_USAGE");
+            return;
+        }
+        $isleName = $args[0] ?? $session->getLastInvitation();
+        $isle = $session->getInvitation($isleName);
+        if($isle == null) {
+            return;
+        }
+        $session->removeInvitation($isleName);
+        $session->sendTranslatedMessage("INVITATION_REFUSED");
+        $isle->broadcastTranslatedMessage("PLAYER_INVITATION_DENIED", [
+            "name" => $session->getUsername()
+        ]);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\isle\IsleManager;
+use room17\SkyBlock\session\Session;
+
+class DisbandCommand extends IsleCommand {
+    
+    /** @var IsleManager */
+    private $isleManager;
+    
+    /**
+     * DisbandCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->isleManager = $map->getPlugin()->getIsleManager();
+        parent::__construct(["disband"], "DISBAND_USAGE", "DISBAND_DESCRIPTION");
+    }
+
+    /**
+     * @param Session $session
+     * @param array $args
+     * @throws \ReflectionException
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkFounder($session)) {
+            return;
+        }
+        $this->isleManager->disbandIsle($session->getIsle());
+    }
+    
+}
+<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class KickCommand extends IsleCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /**
+     * KickCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->plugin = $map->getPlugin();
+        parent::__construct(["kick"], "KICK_USAGE", "KICK_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkOfficer($session)) {
+            return;
+        } elseif(!isset($args[0])) {
+            $session->sendTranslatedMessage("KICK_USAGE");
+            return;
+        }
+        $server = $this->plugin->getServer();
+        $player = $server->getPlayer($args[0]);
+        if($player == null) {
+            $session->sendTranslatedMessage("NOT_ONLINE_PLAYER", [
+                "name" => $args[0]
+            ]);
+            return;
+        }
+        $playerSession = $this->plugin->getSessionManager()->getSession($player);
+        if($this->checkClone($session, $playerSession)) {
+            return;
+        } elseif($playerSession->getIsle() === $session->getIsle()) {
+            $session->sendTranslatedMessage("CANNOT_KICK_A_MEMBER");
+        } elseif(in_array($player, $session->getIsle()->getPlayersOnline())) {
+            $player->teleport($server->getDefaultLevel()->getSpawnLocation());
+            $playerSession->sendTranslatedMessage("KICKED_FROM_THE_ISLAND");
+            $session->sendTranslatedMessage("YOU_KICKED_A_PLAYER", [
+                "name" => $playerSession->getUsername()
+            ]);
+        } else {
+            $session->sendTranslatedMessage("NOT_A_VISITOR", [
+                "name" => $playerSession->getUsername()
+            ]);
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class FireCommand extends IsleCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /**
+     * FireCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->plugin = $map->getPlugin();
+        parent::__construct(["fire"], "FIRE_USAGE", "FIRE_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkLeader($session)) {
+            return;
+        } elseif(!isset($args[0])) {
+            $session->sendTranslatedMessage("FIRE_USAGE");
+            return;
+        }
+        $offlineSession = $this->plugin->getSessionManager()->getOfflineSession($args[0]);
+        if($this->checkClone($session, $offlineSession->getSession())) {
+            return;
+        } elseif($offlineSession->getIsleId() != $session->getIsleId()) {
+            $session->sendTranslatedMessage("MUST_BE_PART_OF_YOUR_ISLAND", [
+                "name" => $args[0]
+            ]);
+        } elseif($offlineSession->getRank() == Session::RANK_FOUNDER) {
+            $session->sendTranslatedMessage("CANNOT_FIRE_FOUNDER");
+        } else {
+            $onlineSession = $offlineSession->getSession();
+            if($onlineSession != null) {
+                if($onlineSession->getIsle()->getLevel() === $onlineSession->getPlayer()->getLevel()) {
+                    $onlineSession->getPlayer()->teleport($this->plugin->getServer()->getDefaultLevel()->getSpawnLocation());
+                }
+                $onlineSession->setRank(Session::RANK_DEFAULT);
+                $onlineSession->setIsle(null);
+                $onlineSession->sendTranslatedMessage("YOU_HAVE_BEEN_FIRED");
+                $onlineSession->save();
+            } else {
+                $offlineSession->setIsleId(null);
+                $offlineSession->setRank(Session::RANK_DEFAULT);
+                $offlineSession->save();
+            }
+            $session->sendTranslatedMessage("SUCCESSFULLY_FIRED", [
+                "name" => $args[0]
+            ]);
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class PromoteCommand extends IsleCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /**
+     * PromoteCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->plugin = $map->getPlugin();
+        parent::__construct(["promote"], "PROMOTE_USAGE", "PROMOTE_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkLeader($session)) {
+            return;
+        } elseif(!isset($args[0])) {
+            $session->sendTranslatedMessage("PROMOTE_USAGE");
+            return;
+        }
+    
+        $offlineSession = $this->plugin->getSessionManager()->getOfflineSession($args[0]);
+        if($this->checkClone($session, $offlineSession->getSession())) {
+            return;
+        } elseif($offlineSession->getIsleId() != $session->getIsleId()) {
+            $session->sendTranslatedMessage("MUST_BE_PART_OF_YOUR_ISLAND", [
+                "name" => $args[0]
+            ]);
+        } else {
+            $rank = null;
+            $rankName = "";
+            switch($offlineSession->getRank()) {
+                case Session::RANK_DEFAULT:
+                    $rank = Session::RANK_OFFICER;
+                    $rankName = "OFFICER";
+                    break;
+                case Session::RANK_OFFICER:
+                    $rank = Session::RANK_LEADER;
+                    $rankName = "LEADER";
+                    break;
+            }
+            if($rank == null) {
+                $session->sendTranslatedMessage("CANNOT_PROMOTE_LEADER", [
+                    "name" => $args[0]
+                ]);
+                return;
+            }
+            $onlineSession = $offlineSession->getSession();
+            if($onlineSession != null) {
+                $onlineSession->setRank($rank);
+                $onlineSession->sendTranslatedMessage("YOU_HAVE_BEEN_PROMOTED");
+                $onlineSession->save();
+            } else {
+                $offlineSession->setRank($rank);
+                $offlineSession->save();
+            }
+            $session->sendTranslatedMessage("SUCCESSFULLY_PROMOTED_PLAYER", [
+                "name" => $args[0],
+                "to" => $session->translate($rankName)
+            ]);
+        }
+        
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class DemoteCommand extends IsleCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /**
+     * DemoteCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->plugin = $map->getPlugin();
+        parent::__construct(["demote"], "DEMOTE_USAGE", "DEMOTE_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkLeader($session)) {
+            return;
+        } elseif(!isset($args[0])) {
+            $session->sendTranslatedMessage("DEMOTE_USAGE");
+            return;
+        }
+        
+        $offlineSession = $this->plugin->getSessionManager()->getOfflineSession($args[0]);
+        if($this->checkClone($session, $offlineSession->getSession())) {
+            return;
+        } elseif($offlineSession->getIsleId() != $session->getIsleId()) {
+            $session->sendTranslatedMessage("MUST_BE_PART_OF_YOUR_ISLAND", [
+                "name" => $args[0]
+            ]);
+        } else {
+            $rank = null;
+            $rankName = "";
+            switch($offlineSession->getRank()) {
+                case Session::RANK_OFFICER:
+                    $rank = Session::RANK_DEFAULT;
+                    $rankName = "MEMBER";
+                    break;
+                case Session::RANK_LEADER:
+                    $rank = Session::RANK_OFFICER;
+                    $rankName = "OFFICER";
+                    break;
+                case Session::RANK_FOUNDER:
+                    $rank = false;
+            }
+            if($rank == null) {
+                $session->sendTranslatedMessage("CANNOT_DEMOTE_MEMBER", [
+                    "name" => $args[0]
+                ]);
+                return;
+            } elseif($rank == false) {
+                $session->sendTranslatedMessage("CANNOT_DEMOTE_FOUNDER");
+                return;
+            }
+            $onlineSession = $offlineSession->getSession();
+            if($onlineSession != null) {
+                $onlineSession->setRank($rank);
+                $onlineSession->sendTranslatedMessage("YOU_HAVE_BEEN_DEMOTED");
+                $onlineSession->save();
+            } else {
+                $offlineSession->setRank($rank);
+                $offlineSession->save();
+            }
+            $session->sendTranslatedMessage("SUCCESSFULLY_DEMOTED_PLAYER", [
+                "name" => $args[0],
+                "to" => $session->translate($rankName)
+            ]);
+        }
+        
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\Session;
+
+class SetSpawnCommand extends IsleCommand {
+    
+    /**
+     * SetSpawnCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct(["setspawn"], "SET_SPAWN_USAGE", "SET_SPAWN_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkOfficer($session)) {
+            return;
+        } elseif($session->getPlayer()->getLevel() !== $session->getIsle()->getLevel()) {
+            $session->sendTranslatedMessage("MUST_BE_IN_YOUR_ISLAND");
+        } else {
+            $session->getIsle()->setSpawnLocation($session->getPlayer());
+            $session->sendTranslatedMessage("SUCCESSFULLY_SET_SPAWN");
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\BaseSession;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class TransferCommand extends IsleCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /**
+     * TransferCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->plugin = $map->getPlugin();
+        parent::__construct(["transfer", "makeleader"], "TRANSFER_USAGE", "TRANSFER_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkFounder($session)) {
+            return;
+        } elseif(!isset($args[0])) {
+            $session->sendTranslatedMessage("TRANSFER_USAGE");
+            return;
+        }
+        $player = $this->plugin->getServer()->getPlayer($args[0]);
+        if($player == null) {
+            $session->sendTranslatedMessage("NOT_ONLINE_PLAYER", [
+                "name" => $args[0]
+            ]);
+            return;
+        }
+        $playerSession = $this->plugin->getSessionManager()->getSession($player);
+        if($this->checkClone($session, $playerSession)) {
+            return;
+        } elseif($playerSession->getIsle() !== $session->getIsle()) {
+            $session->sendTranslatedMessage("MUST_BE_PART_OF_YOUR_ISLAND", [
+                "name" => $playerSession->getUsername()
+            ]);
+            return;
+        }
+        $session->setRank(BaseSession::RANK_DEFAULT);
+        $playerSession->setRank(BaseSession::RANK_FOUNDER);
+        $session->sendTranslatedMessage("RANK_TRANSFERRED", [
+            "name" => $playerSession->getUsername()
+        ]);
+        $playerSession->sendTranslatedMessage("GOT_RANK_TRANSFERRED", [
+            "name" => $session->getUsername()
+        ]);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\Session;
+
+class CategoryCommand extends IsleCommand {
+    
+    /**
+     * CategoryCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct(["category", "c"], "CATEGORY_USAGE", "CATEGORY_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkIsle($session)) {
+            return;
+        }
+        $session->sendTranslatedMessage("ISLAND_CATEGORY", [
+            "category" => $session->getIsle()->getCategory()
+        ]);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\session\Session;
+
+class BlocksCommand extends IsleCommand {
+    
+    /**
+     * BlocksCommand constructor.
+     */
+    public function __construct() {
+        parent::__construct(["blocks"], "BLOCKS_USAGE", "BLOCKS_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkIsle($session)) {
+            return;
+        }
+        $session->sendTranslatedMessage("ISLAND_BLOCKS", [
+            "amount" => $session->getIsle()->getBlocksBuilt()
+        ]);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\command\presets;
+
+
+use room17\SkyBlock\command\IsleCommand;
+use room17\SkyBlock\command\IsleCommandMap;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\SkyBlock;
+
+class CooperateCommand extends IsleCommand {
+    
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /**
+     * CooperateCommand constructor.
+     * @param IsleCommandMap $map
+     */
+    public function __construct(IsleCommandMap $map) {
+        $this->plugin = $map->getPlugin();
+        parent::__construct(["cooperate"], "COOPERATE_USAGE", "COOPERATE_DESCRIPTION");
+    }
+    
+    /**
+     * @param Session $session
+     * @param array $args
+     */
+    public function onCommand(Session $session, array $args): void {
+        if($this->checkLeader($session)) {
+            return;
+        } elseif(!isset($args[0])) {
+            $session->sendTranslatedMessage("COOPERATE_USAGE");
+            return;
+        }
+        $player = $this->plugin->getServer()->getPlayer($args[0]);
+        if($player == null) {
+            $session->sendTranslatedMessage("NOT_ONLINE_PLAYER", [
+                "name" => $args[0]
+            ]);
+            return;
+        }
+        $playerSession = $this->plugin->getSessionManager()->getSession($player);
+        $playerName = $playerSession->getPlayer()->getName();
+        $sessionName = $session->getPlayer()->getName();
+        $isle = $session->getIsle();
+        if($this->checkClone($session, $playerSession)) {
+            return;
+        } elseif($playerSession->getIsle() === $session->getIsle()) {
+            $session->sendTranslatedMessage("ALREADY_ON_YOUR_ISLAND", [
+                "name" => $playerName
+            ]);
+        } elseif($isle->isCooperator($playerSession)) {
+            $isle->removeCooperator($playerSession);
+            $session->sendTranslatedMessage("REMOVED_A_COOPERATOR", [
+                "name" => $playerName
+            ]);
+            $playerSession->sendTranslatedMessage("NOW_YOU_CANNOT_COOPERATE", [
+                "name" => $sessionName
+            ]);
+        } else {
+            $isle->addCooperator($playerSession);
+            $session->sendTranslatedMessage("ADDED_A_COOPERATOR", [
+                "name" => $playerName
+            ]);
+            $playerSession->sendTranslatedMessage("NOW_YOU_CAN_COOPERATE", [
+                "name" => $sessionName
+            ]);
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock;
+
+use pocketmine\block\Solid;
+use pocketmine\entity\object\Painting;
+use pocketmine\event\block\BlockBreakEvent;
+use pocketmine\event\block\BlockFormEvent;
+use pocketmine\event\block\BlockPlaceEvent;
+use pocketmine\event\entity\EntityDamageByEntityEvent;
+use pocketmine\event\entity\EntityDamageEvent;
+use pocketmine\event\level\ChunkLoadEvent;
+use pocketmine\event\level\LevelUnloadEvent;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerChatEvent;
+use pocketmine\event\player\PlayerCommandPreprocessEvent;
+use pocketmine\event\player\PlayerInteractEvent;
+use pocketmine\event\player\PlayerQuitEvent;
+use pocketmine\Player;
+use pocketmine\tile\Chest;
+use pocketmine\tile\Tile;
+use room17\SkyBlock\generator\IsleGenerator;
+use room17\SkyBlock\isle\IsleManager;
+use room17\SkyBlock\session\Session;
+use room17\SkyBlock\session\SessionManager;
+
+class SkyBlockListener implements Listener {
+
+    /** @var SkyBlock */
+    private $plugin;
+    
+    /** @var SessionManager */
+    private $sessionManager;
+    
+    /** @var IsleManager */
+    private $isleManager;
+
+    /**
+     * SkyBlockListener constructor.
+     *
+     * @param SkyBlock $plugin
+     */
+    public function __construct(SkyBlock $plugin) {
+        $this->plugin = $plugin;
+        $this->sessionManager = $plugin->getSessionManager();
+        $this->isleManager = $plugin->getIsleManager();
+        $plugin->getServer()->getPluginManager()->registerEvents($this, $plugin);
+    }
+
+    /**
+     * @param Player $player
+     * @return Session|null
+     */
+    public function getSession(Player $player): ?Session {
+        return $this->plugin->getSessionManager()->getSession($player);
+    }
+    
+    /**
+     * @param ChunkLoadEvent $event
+     */
+    public function onChunkLoad(ChunkLoadEvent $event): void {
+        $level = $event->getLevel();
+        $isle = $this->plugin->getIsleManager()->getIsle($level->getName());
+        if($isle == null) {
+            return;
+        }
+        $generator = $this->plugin->getGeneratorManager()->getGenerator($type = $isle->getType());
+        /** @var IsleGenerator $generator */
+        $position = $generator::getChestPosition();
+        if($level->getChunk($position->x >> 4, $position->z >> 4) === $event->getChunk() and $event->isNewChunk()) {
+            /** @var Chest $chest */
+            $chest = Tile::createTile(Tile::CHEST, $level, Chest::createNBT($position));
+            foreach($this->plugin->getSettings()->getChestPerGenerator($type) as $item) {
+                $chest->getInventory()->addItem($item);
+            }
+        }
+    }
+    
+    /**
+     * @param BlockBreakEvent $event
+     */
+    public function onBreak(BlockBreakEvent $event): void {
+        $player = $event->getPlayer();
+        $session = $this->getSession($player);
+        $isle = $this->isleManager->getIsle($player->getLevel()->getName());
+        if($isle != null) {
+            if(!$isle->canInteract($session)) {
+                $session->sendTranslatedPopup("MUST_BE_MEMBER");
+                $event->setCancelled();
+            } elseif(!($event->isCancelled()) and $event->getBlock() instanceof Solid) {
+                $isle->destroyBlock();
+            }
+        }
+    }
+    
+    /**
+     * @param BlockPlaceEvent $event
+     */
+    public function onPlace(BlockPlaceEvent $event): void {
+        $player = $event->getPlayer();
+        $session = $this->getSession($player);
+        $isle = $this->isleManager->getIsle($player->getLevel()->getName());
+        if($isle != null) {
+            if(!$isle->canInteract($session)) {
+                $session->sendTranslatedPopup("MUST_BE_MEMBER");
+                $event->setCancelled();
+            } elseif(!($event->isCancelled()) and $event->getBlock() instanceof Solid) {
+                $isle->addBlock();
+            }
+        }
+    }
+
+    /**
+     * @param BlockFormEvent $event
+     */
+    public function onBlockForm(BlockFormEvent $event): void {
+        $block = $event->getBlock();
+        $newBlock = $event->getNewState();
+        $isle = $this->isleManager->getIsle($block->getLevel()->getName());
+        if($isle != null and !($block instanceof Solid) and $newBlock instanceof Solid) {
+            $isle->addBlock();
+        }
+    }
+    
+    /**
+     * @param PlayerInteractEvent $event
+     */
+    public function onInteract(PlayerInteractEvent $event): void {
+        $player = $event->getPlayer();
+        $session = $this->getSession($player);
+        $isle = $this->plugin->getIsleManager()->getIsle($player->getLevel()->getName());
+        if($isle != null and !($isle->canInteract($session))) {
+            $session->sendTranslatedPopup("MUST_BE_MEMBER");
+            $event->setCancelled();
+        }
+    }
+    
+    /**
+     * @param PlayerChatEvent $event
+     */
+    public function onChat(PlayerChatEvent $event): void {
+        $sessionManager = $this->plugin->getSessionManager();
+        $session = $sessionManager->getSession($event->getPlayer());
+        if(!($session->hasIsle()) or !($session->isInChat())) {
+            return;
+        }
+        $recipients = [];
+        foreach($sessionManager->getSessions() as $userSession) {
+            if($userSession->isInChat() and $userSession->getIsle() === $session->getIsle()) {
+                $recipients[] = $userSession->getPlayer();
+            }
+        }
+        $event->setRecipients($recipients);
+    }
+    
+    /**
+     * @param EntityDamageEvent $event
+     */
+    public function onHurt(EntityDamageEvent $event): void {
+        $entity = $event->getEntity();
+        $level = $entity->getLevel();
+        if($level == null) return;
+        $isle = $this->isleManager->getIsle($level->getName());
+        if($isle == null) return;
+        if($event instanceof EntityDamageByEntityEvent) {
+            $damager = $event->getDamager();
+            if(($entity instanceof Player or ($entity instanceof Painting and $damager instanceof Player
+                and !$isle->canInteract($this->getSession($damager))))) {
+                $event->setCancelled();
+            }
+        } elseif($event->getCause() == EntityDamageEvent::CAUSE_VOID
+            and $this->plugin->getSettings()->isPreventVoidDamage()) {
+            $entity->teleport($isle->getSpawnLocation());
+            $event->setCancelled();
+        }
+    }
+    
+    
+    /**
+     * @param LevelUnloadEvent $event
+     */
+    public function onUnloadLevel(LevelUnloadEvent $event): void {
+        foreach($event->getLevel()->getPlayers() as $player) {
+            $player->teleport($this->plugin->getServer()->getDefaultLevel()->getSafeSpawn());
+        }
+    }
+
+    /**
+     * @param PlayerCommandPreprocessEvent $event
+     */
+    public function onCommand(PlayerCommandPreprocessEvent $event): void {
+        $message = $event->getMessage();
+        $player = $event->getPlayer();
+        if($this->isleManager->getIsle($player->getLevel()->getName()) != null and
+            $message{0} == "/" and
+            in_array(strtolower(substr($message, 1)), $this->plugin->getSettings()->getIsleBlockedCommands())
+        ) {
+            $this->getSession($player)->sendTranslatedMessage("BLOCKED_COMMAND");
+            $event->setCancelled();
+        }
+    }
+
+    /**
+     * @param PlayerQuitEvent $event
+     * @throws \ReflectionException
+     */
+    public function onQuit(PlayerQuitEvent $event): void {
+        $player = $event->getPlayer();
+        $session = $this->getSession($player);
+        if($session == null) return;
+        $isleManager = $this->plugin->getIsleManager();
+        foreach($isleManager->getIsles() as $isle) {
+            if($isle->isCooperator($session)) {
+                $isle->removeCooperator($session);
+            }
+        }
+        $isle = $isleManager->getIsle($player->getLevel()->getName());
+        if($isle != null) {
+            $player->teleport($this->plugin->getServer()->getDefaultLevel()->getSafeSpawn());
+            $isle->tryToClose();
+        }
+    }
+
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\session;
+
+
+use pocketmine\Player;
+use room17\SkyBlock\isle\Isle;
+
+class Session extends BaseSession {
+    
+    /** @var Player */
+    private $player;
+    
+    /** @var null|Isle */
+    private $isle = null;
+    
+    /** @var string|null */
+    private $lastInvitation = null;
+    
+    /** @var array */
+    private $invitations = [];
+    
+    /**
+     * Session constructor.
+     * @param SessionManager $manager
+     * @param Player $player
+     */
+    public function __construct(SessionManager $manager, Player $player) {
+        $this->player = $player;
+        parent::__construct($manager, $player->getLowerCaseName());
+    }
+    
+    /**
+     * @return Player
+     */
+    public function getPlayer(): Player {
+        return $this->player;
+    }
+    
+    /**
+     * @return null|Isle
+     */
+    public function getIsle(): ?Isle {
+        return $this->isle;
+    }
+    
+    /**
+     * @return bool
+     */
+    public function hasIsle(): bool {
+        return $this->isle != null;
+    }
+    
+    /**
+     * @return OfflineSession
+     */
+    public function getOffline(): OfflineSession {
+        return new OfflineSession($this->manager, $this->username);
+    }
+    
+    /**
+     * @return array
+     */
+    public function getInvitations(): array {
+        return $this->invitations;
+    }
+    
+    /**
+     * @param string $senderName
+     * @return null|Isle
+     */
+    public function getInvitation(string $senderName): ?Isle {
+        return $this->invitations[$senderName] ?? null;
+    }
+    
+    /**
+     * @return null|string
+     */
+    public function getLastInvitation(): ?string {
+        return $this->lastInvitation;
+    }
+    
+    /**
+     * @return bool
+     */
+    public function hasLastInvitation(): bool {
+        return $this->lastInvitation != null;
+    }
+    
+    /**
+     * @param null|string $isle
+     */
+    public function setIsleId(?string $isle): void {
+        parent::setIsleId($isle);
+        if($isle != null) {
+            $this->provider->loadIsle($isle);
+            $this->isle = $this->manager->getPlugin()->getIsleManager()->getIsle($isle);
+        }
+    }
+    
+    /**
+     * @param null|Isle $isle
+     */
+    public function setIsle(?Isle $isle): void {
+        $lastIsle = $this->isle;
+        $this->isle = $isle;
+        $this->isleId = ($isle != null) ? $isle->getIdentifier() : null;
+        if($isle != null) {
+            $isle->addMember($this->getOffline());
+        }
+        if($lastIsle != null) {
+            $lastIsle->updateMembers();
+        }
+        $this->save();
+    }
+    
+    /**
+     * @param array $invitations
+     */
+    public function setInvitations(array $invitations): void {
+        $this->invitations = $invitations;
+    }
+    
+    /**
+     * @param string $senderName
+     * @param Isle $isle
+     */
+    public function addInvitation(string $senderName, Isle $isle): void {
+        $this->invitations[$senderName] = $isle;
+        $this->lastInvitation = $senderName;
+    }
+    
+    /**
+     * @param string $senderName
+     */
+    public function removeInvitation(string $senderName): void {
+        if(isset($this->invitations[$senderName])) {
+            unset($this->invitations[$senderName]);
+        }
+    }
+    
+    /**
+     * @param null|string $senderName
+     */
+    public function setLastInvitation(?string $senderName): void {
+        $this->lastInvitation = $senderName;
+    }
+    
+    /**
+     * @param string $identifier
+     * @param array $args
+     * @return string
+     */
+    public function translate(string $identifier, array $args = []): string {
+        return $this->manager->getPlugin()->getSettings()->getMessage($identifier, $args);
+    }
+    
+    /**
+     * @param string $identifier
+     * @param array $args
+     */
+    public function sendTranslatedMessage(string $identifier, array $args = []): void {
+        $this->player->sendMessage($this->translate($identifier, $args));
+    }
+    
+    /**
+     * @param string $identifier
+     * @param array $args
+     */
+    public function sendTranslatedPopup(string $identifier, array $args = []): void {
+        $this->player->sendPopup($this->translate($identifier, $args));
+    }
+    
+    /**
+     * @param string $identifier
+     * @param array $args
+     */
+    public function sendTranslatedTip(string $identifier, array $args = []): void {
+        $this->player->sendTip($this->translate($identifier, $args));
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\session;
+
+
+use room17\SkyBlock\provider\Provider;
+
+abstract class BaseSession {
+    
+    /** @var SessionManager */
+    protected $manager;
+    
+    /** @var Provider */
+    protected $provider;
+    
+    /** @var string */
+    protected $username;
+    
+    /** @var string|null */
+    protected $isleId = null;
+    
+    /** @var bool */
+    protected $inChat = false;
+    
+    /** @var int */
+    protected $rank = false;
+    
+    const RANK_DEFAULT = 0;
+    const RANK_OFFICER = 1;
+    const RANK_LEADER = 2;
+    const RANK_FOUNDER = 3;
+
+    /** @var float|null */
+    protected $lastIslandCreationTime;
+    
+    /**
+     * iSession constructor.
+     * @param SessionManager $manager
+     * @param string $username
+     */
+    public function __construct(SessionManager $manager, string $username) {
+        $this->manager = $manager;
+        $this->username = $username;
+        $this->provider = $manager->getPlugin()->getProvider();
+        $this->provider->loadSession($this);
+    }
+    
+    /**
+     * @return string
+     */
+    public function getUsername(): string {
+        return $this->username;
+    }
+    
+    /**
+     * @return null|string
+     */
+    public function getIsleId(): ?string {
+        return $this->isleId;
+    }
+    
+    /**
+     * @return bool
+     */
+    public function isInChat(): bool {
+        return $this->inChat;
+    }
+    
+    /**
+     * @return int
+     */
+    public function getRank(): int {
+        return $this->rank;
+    }
+
+    /**
+     * @return bool
+     */
+    public function hasLastIslandCreationTime(): bool {
+        return $this->lastIslandCreationTime != null;
+    }
+
+    /**
+     * @return float|null
+     */
+    public function getLastIslandCreationTime(): ?float {
+        return $this->lastIslandCreationTime;
+    }
+    
+    /**
+     * @param null|string $isle
+     */
+    public function setIsleId(?string $isle): void {
+        $this->isleId = $isle;
+    }
+    
+    /**
+     * @param bool $inChat
+     */
+    public function setInChat(bool $inChat = true): void {
+        $this->inChat = $inChat;
+    }
+    
+    /**
+     * @param int $rank
+     */
+    public function setRank(int $rank = self::RANK_DEFAULT): void {
+        $this->rank = $rank;
+    }
+
+    /**
+     * @param float|null $lastIslandCreationTime
+     */
+    public function setLastIslandCreationTime(?float $lastIslandCreationTime): void  {
+        $this->lastIslandCreationTime = $lastIslandCreationTime;
+    }
+    
+    public function save(): void {
+        $this->provider->saveSession($this);
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\session;
+
+
+class OfflineSession extends BaseSession {
+    
+    /**
+     * @return null|Session
+     */
+    public function getSession(): ?Session {
+        $player = $this->manager->getPlugin()->getServer()->getPlayerExact($this->username);
+        if($player != null) {
+            return $this->manager->getSession($player);
+        }
+        return null;
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\isle;
+
+
+use pocketmine\level\Level;
+use pocketmine\level\Position;
+use pocketmine\math\Vector3;
+use room17\SkyBlock\session\OfflineSession;
+use room17\SkyBlock\session\Session;
+
+class Isle {
+    
+    /** @var IsleManager */
+    private $manager;
+    
+    /** @var string */
+    private $identifier;
+    
+    /** @var OfflineSession[] */
+    private $members = [];
+    
+    /** @var bool */
+    private $locked = false;
+    
+    /** @var string */
+    private $type = self::TYPE_BASIC;
+    
+    const TYPE_BASIC = "basic.isle";
+    const TYPE_OP = "op.isle";
+    
+    /** @var Level */
+    private $level;
+    
+    /** @var int */
+    private $blocksBuilt;
+    
+    /** @var string */
+    private $category;
+    
+    const CATEGORY_EXTRA_SMALL = "XS";
+    const CATEGORY_SMALL = "S";
+    const CATEGORY_MEDIUM = "M";
+    const CATEGORY_LARGE = "L";
+    const CATEGORY_EXTRA_LARGE = "XL";
+    
+    /** @var Session[] */
+    private $cooperators = [];
+
+    /** @var bool */
+    private $closed = false;
+    
+    /**
+     * Isle constructor.
+     * @param IsleManager $manager
+     * @param string $identifier
+     * @param array $members
+     * @param bool $locked
+     * @param string $type
+     * @param Level $level
+     * @param int $blocksBuilt
+     */
+    public function __construct(IsleManager $manager, string $identifier, array $members, bool $locked, string $type,
+        Level $level, int $blocksBuilt) {
+        $this->manager = $manager;
+        $this->identifier = $identifier;
+        $this->locked = $locked;
+        $this->type = $type;
+        $this->level = $level;
+        $this->blocksBuilt = $blocksBuilt;
+    
+        foreach($members as $member) {
+            if($member instanceof OfflineSession) {
+                $this->addMember($member);
+            }
+        }
+        
+        $this->updateCategory();
+    }
+    
+    /**
+     * @return string
+     */
+    public function getIdentifier(): string {
+        return $this->identifier;
+    }
+    
+    /**
+     * @return OfflineSession[]
+     */
+    public function getMembers(): array {
+        return $this->members;
+    }
+    
+    /**
+     * @return Session[]
+     */
+    public function getPlayersOnline(): array {
+        return $this->level->getPlayers();
+    }
+    
+    /**
+     * @return Session[]
+     */
+    public function getMembersOnline(): array {
+        $sessions = [];
+        foreach($this->members as $member) {
+            $session = $member->getSession();
+            if($session != null) {
+                $sessions[] = $session;
+            }
+        }
+        return $sessions;
+    }
+    
+    /**
+     * @return bool
+     */
+    public function isLocked(): bool {
+        return $this->locked;
+    }
+    
+    /**
+     * @return string
+     */
+    public function getType(): string {
+        return $this->type;
+    }
+    
+    /**
+     * @return Level
+     */
+    public function getLevel(): Level {
+        return $this->level;
+    }
+    
+    /**
+     * @return Position
+     */
+    public function getSpawnLocation(): Position {
+        return $this->level->getSpawnLocation();
+    }
+    
+    /**
+     * @return int
+     */
+    public function getBlocksBuilt(): int {
+        return $this->blocksBuilt;
+    }
+    
+    /**
+     * @return string
+     */
+    public function getCategory(): string {
+        return $this->category;
+    }
+    
+    /**
+     * @return string|null
+     */
+    public function getNextCategory(): ?string {
+        switch($this->category) {
+            case self::CATEGORY_EXTRA_LARGE:
+                return null;
+                break;
+            case self::CATEGORY_LARGE:
+                return self::CATEGORY_EXTRA_LARGE;
+                break;
+            case self::CATEGORY_MEDIUM:
+                return self::CATEGORY_LARGE;
+                break;
+            case self::CATEGORY_SMALL:
+                return self::CATEGORY_MEDIUM;
+                break;
+            default:
+                return self::CATEGORY_SMALL;
+        }
+    }
+    
+    /**
+     * @return int
+     */
+    public function getSlots(): int {
+        return $this->manager->getPlugin()->getSettings()->getSlotsBySize($this->category);
+    }
+    
+    /**
+     * @return Session[]
+     */
+    public function getCooperators(): array {
+        return $this->cooperators;
+    }
+    
+    /**
+     * @param Session $session
+     * @return bool
+     */
+    public function isCooperator(Session $session): bool {
+        return isset($this->cooperators[$session->getUsername()]);
+    }
+
+    /**
+     * @return bool
+     */
+    public function isClosed(): bool {
+        return $this->closed;
+    }
+    
+    /**
+     * @param Session $session
+     * @return bool
+     */
+    public function canInteract(Session $session): bool {
+        return $session->getIsle() === $this or $this->isCooperator($session) or $session->getPlayer()->hasPermission("skyblock.interaction");
+    }
+    
+    /**
+     * @param bool $locked
+     */
+    public function setLocked(bool $locked = true): void {
+        $this->locked = $locked;
+    }
+    
+    /**
+     * @param OfflineSession[] $members
+     */
+    public function setMembers(array $members): void {
+        $this->members = $members;
+    }
+    
+    /**
+     * @param Vector3 $position
+     */
+    public function setSpawnLocation(Vector3 $position): void {
+        $this->level->setSpawnLocation($position);
+    }
+    
+    /**
+     * @param int $blocksBuilt
+     */
+    public function setBlocksBuilt(int $blocksBuilt): void {
+        $this->blocksBuilt = max(0, $blocksBuilt);
+        $this->updateCategory();
+    }
+    
+    public function updateCategory(): void {
+        if($this->blocksBuilt >= 500000) {
+            $this->category = self::CATEGORY_EXTRA_LARGE;
+        } elseif($this->blocksBuilt >= 100000) {
+            $this->category = self::CATEGORY_LARGE;
+        } elseif($this->blocksBuilt >= 50000) {
+            $this->category = self::CATEGORY_MEDIUM;
+        } elseif($this->blocksBuilt >= 10000) {
+            $this->category = self::CATEGORY_SMALL;
+        } else {
+            $this->category = self::CATEGORY_EXTRA_SMALL;
+        }
+    }
+    
+    public function addBlock(): void {
+        $this->setBlocksBuilt($this->blocksBuilt + 1);
+    }
+    
+    public function destroyBlock(): void {
+        $this->setBlocksBuilt($this->blocksBuilt - 1);
+    }
+    
+    /**
+     * @param OfflineSession $session
+     */
+    public function addMember(OfflineSession $session): void {
+        $this->members[strtolower($session->getUsername())] = $session;
+    }
+    
+    /**
+     * @param Session[] $cooperators
+     */
+    public function setCooperators(array $cooperators): void {
+        $this->cooperators = $cooperators;
+    }
+    
+    /**
+     * @param Session $session
+     */
+    public function addCooperator(Session $session): void {
+        $this->cooperators[$session->getUsername()] = $session;
+    }
+    
+    /**
+     * @param Session $session
+     */
+    public function removeCooperator(Session $session): void {
+        if(isset($this->cooperators[$username = $session->getUsername()])) {
+            unset($this->cooperators[$username]);
+        }
+    }
+    
+    /**
+     * @param string $message
+     */
+    public function broadcastMessage(string $message): void {
+        foreach($this->getMembersOnline() as $session) {
+            $session->getPlayer()->sendMessage($message);
+        }
+    }
+    
+    /**
+     * @param string $identifier
+     * @param array $args
+     */
+    public function broadcastTranslatedMessage(string $identifier, array $args = []): void {
+        foreach($this->getMembersOnline() as $session) {
+            $session->sendTranslatedMessage($identifier, $args);
+        }
+    }
+    
+    /**
+     * @param string $message
+     */
+    public function broadcastPopup(string $message): void {
+        foreach($this->getMembersOnline() as $session) {
+            $session->getPlayer()->sendPopup($message);
+        }
+    }
+    
+    /**
+     * @param string $identifier
+     * @param array $args
+     */
+    public function broadcastTranslatedPopup(string $identifier, array $args = []): void {
+        foreach($this->getMembersOnline() as $session) {
+            $session->sendTranslatedPopup($identifier, $args);
+        }
+    }
+    
+    /**
+     * @param string $message
+     */
+    public function broadcastTip(string $message): void {
+        foreach($this->getMembersOnline() as $session) {
+            $session->getPlayer()->sendTip($message);
+        }
+    }
+    
+    /**
+     * @param string $identifier
+     * @param array $args
+     */
+    public function broadcastTranslatedTip(string $identifier, array $args = []): void {
+        foreach($this->getMembersOnline() as $session) {
+            $session->sendTranslatedTip($identifier, $args);
+        }
+    }
+    
+    public function save(): void {
+        $this->manager->getPlugin()->getProvider()->saveIsle($this);
+    }
+    
+    public function updateMembers(): void {
+        foreach($this->getMembersOnline() as $member) {
+            if($member->getIsle() !== $this) {
+                unset($this->members[$member->getUsername()]);
+            }
+        }
+    }
+
+    /**
+     * @throws \ReflectionException
+     */
+    public function tryToClose(): void {
+        $this->updateMembers();
+        if(!$this->closed and empty($this->getPlayersOnline()) and empty($this->getMembersOnline())) {
+            $this->closed = true;
+            $this->manager->closeIsle($this);
+        }
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\event\isle;
+
+
+class IsleOpenEvent extends IsleEvent {
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\event\isle;
+
+
+use room17\SkyBlock\event\SkyBlockEvent;
+use room17\SkyBlock\isle\Isle;
+
+abstract class IsleEvent extends SkyBlockEvent {
+    
+    /** @var Isle */
+    private $isle;
+    
+    /**
+     * IsleEvent constructor.
+     * @param Isle $isle
+     */
+    public function __construct(Isle $isle) {
+        $this->isle = $isle;
+    }
+    
+    /**
+     * @return Isle
+     */
+    public function getIsle(): Isle {
+        return $this->isle;
+    }
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\event;
+
+
+use pocketmine\event\Event;
+
+abstract class SkyBlockEvent extends Event {
+    
+    /** @var null */
+    public static $handlerList = null;
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\event\session;
+
+
+class SessionOpenEvent extends SessionEvent {
+    
+}<?php
+/**
+ *  _____    ____    ____   __  __  __  ______
+ * |  __ \  / __ \  / __ \ |  \/  |/_ ||____  |
+ * | |__) || |  | || |  | || \  / | | |    / /
+ * |  _  / | |  | || |  | || |\/| | | |   / /
+ * | | \ \ | |__| || |__| || |  | | | |  / /
+ * |_|  \_\ \____/  \____/ |_|  |_| |_| /_/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
+declare(strict_types=1);
+
+namespace room17\SkyBlock\event\session;
+
+
+use room17\SkyBlock\event\SkyBlockEvent;
+use room17\SkyBlock\session\Session;
+
+abstract class SessionEvent extends SkyBlockEvent {
+    
+    /** @var Session */
+    private $session;
+    
+    /**
+     * SessionEvent constructor.
+     * @param Session $session
+     */
+    public function __construct(Session $session) {
+        $this->session = $session;
+    }
+    
+    /**
+     * @return Session
+     */
+    public function getSession(): Session {
+        return $this->session;
+    }
+    
+}

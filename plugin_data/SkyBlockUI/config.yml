@@ -1,0 +1,51 @@
+#Config Version, don't change it!
+config-version: 7
+
+title: SkyBlockUI
+exit-button: §l§cThoát ra
+content: Quản lý dễ dàng trên đảo của bạn!
+create-content: Bạn phải cài đặt trước để sử dụng đảo của bạn.
+
+#Options
+enable-friends: true
+allow-generators: true
+allow-visit: true
+default-generator: op
+
+#Main form config
+create-island: Tạo đảo
+join-island: Vào đảo
+see-category: Xem danh sách
+see-blocks: Xem đặt khối
+disband-island: Giải tán đảo
+transfer: Chuyển đảo
+lock-unlock: Khóa/Ko khóa hòn đảo
+visit: Viếng thăm đảo
+friends: Bạn bè trên hòn đảo
+
+#Create form config
+basic: Basic
+lost: Lost
+op: OP
+palm: Palm
+shelly: Shelly
+
+#Visit form config
+visit-content: Viếng thăm đảo ng chơi khi đảo được mở khóa.
+
+#Transfer form config
+transfer-content: Chuyển đảo cho ng khác hoặc cho bạn bè của bạn!
+
+#Friends main form config
+friends-content: Bạn có thể chơi chung hòn đảo với bạn!
+invite-button: Mời một người chơi
+accept-button: Chấp nhận lời mời
+deny-button: Hủy bỏ lời mời
+leave-button: Thoát hòn đảo
+cooperate-button: Hợp tác với một người chơi
+
+#Friends invite form config
+invite-content: Mời một người chơi hoặc một người bạn của bạn .Nhưng cần phải giải tán đảo?
+
+#Friends cooperate form config
+cooperate-content: Hãy để một người chơi hợp tác trong hòn đảo của bạn. Sử dụng biểu mẫu này để không cho phép người chơi hợp tác.

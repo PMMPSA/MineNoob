@@ -1,0 +1,1152 @@
+<?php
+
+namespace FurkanGM\Trade;
+
+use FurkanGM\Trade\command\Trade;
+use FurkanGM\Trade\manager\TradeManager;
+use FurkanGM\Trade\libs\muqsit\invmenu\InvMenu;
+use FurkanGM\Trade\libs\muqsit\invmenu\InvMenuHandler;
+use FurkanGM\Trade\libs\dktapps\pmforms\BaseForm;
+use pocketmine\lang\BaseLang;
+use pocketmine\plugin\PluginBase;
+
+class Main extends PluginBase
+{
+
+	/** @var array  */
+	public $tradeRequests = [];
+	/** @var Main */
+	public static $instance;
+	/** @var BaseLang */
+	public $baseLang;
+
+
+	/**
+	 *
+	 */
+	public function onLoad()
+	{
+		self::$instance = $this;
+	}
+
+	/**
+	 *
+	 */
+	public function onEnable()
+	{
+		$lang = $this->getConfig()->get("language", "tur");
+		$baseFolder = $this->getFile() . "/resources";
+		if ($this->getConfig()->get("type") == "ui")
+		{
+			if (!class_exists(BaseForm::class))
+			{
+				$this->getLogger()->critical("Please install pmforms virion library");
+				$this->setEnabled(false);
+				return;
+			}
+		}
+		if (!class_exists(InvMenu::class))
+		{
+			$this->getLogger()->critical("Please install InvMenu virion library");
+			$this->setEnabled(false);
+			return;
+		}
+		if(!InvMenuHandler::isRegistered()){
+			InvMenuHandler::register($this);
+		}
+		if (file_exists($baseFolder . "/lang/" . $lang . ".ini"))
+		{
+			$this->baseLang = new BaseLang($lang, $baseFolder . "/lang/");
+		}else{
+			$this->baseLang = new BaseLang($lang, $baseFolder . "/lang/");
+		}
+		$this->getServer()->getCommandMap()->register("tradegui",new Trade());
+	}
+
+	/**
+	 * @return Main
+	 */
+	public static function getInstance(): Main{
+		return self::$instance;
+	}
+
+	/**
+	 * @return \pocketmine\lang\BaseLang
+	 */
+	public function getLanguage(): BaseLang
+	{
+		return $this->baseLang;
+	}
+
+	/**
+	 * @param string $text
+	 * @param array $params
+	 * @return string
+	 */
+	public function translateText(string $text, $params = []): string
+	{
+		return $this->getLanguage()->translateString($text, $params);
+	}
+
+	/**
+	 * @return \FurkanGM\Trade\manager\TradeManager
+	 */
+	public function getManager(): TradeManager{
+		return new TradeManager($this);
+	}
+
+}
+# ui or command
+type: ui
+language: eng<?php
+
+/*
+ *
+ *  ____            _        _   __  __ _                  __  __ ____
+ * |  _ \ ___   ___| | _____| |_|  \/  (_)_ __   ___      |  \/  |  _ \
+ * | |_) / _ \ / __| |/ / _ \ __| |\/| | | '_ \ / _ \_____| |\/| | |_) |
+ * |  __/ (_) | (__|   <  __/ |_| |  | | | | | |  __/_____| |  | |  __/
+ * |_|   \___/ \___|_|\_\___|\__|_|  |_|_|_| |_|\___|     |_|  |_|_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author PocketMine Team
+ * @link http://www.pocketmine.net/
+ *
+ *
+*/
+
+declare(strict_types=1);
+
+/**
+ * API for Minecraft: Bedrock custom UI (forms)
+ */
+namespace FurkanGM\Trade\libs\dktapps\pmforms;
+
+use pocketmine\form\Form;
+
+/**
+ * Base class for a custom form. Forms are serialized to JSON data to be sent to clients.
+ */
+abstract class BaseForm implements Form{
+
+	/** @var string */
+	protected $title;
+
+	public function __construct(string $title){
+		$this->title = $title;
+	}
+
+	/**
+	 * Returns the text shown on the form title-bar.
+	 * @return string
+	 */
+	public function getTitle() : string{
+		return $this->title;
+	}
+
+	/**
+	 * Serializes the form to JSON for sending to clients.
+	 *
+	 * @return array
+	 */
+	final public function jsonSerialize() : array{
+		$ret = $this->serializeFormData();
+		$ret["type"] = $this->getType();
+		$ret["title"] = $this->getTitle();
+
+		return $ret;
+	}
+
+	/**
+	 * Returns the type used to show this form to clients
+	 * @return string
+	 */
+	abstract protected function getType() : string;
+
+	/**
+	 * Serializes additional data needed to show this form to clients.
+	 * @return array
+	 */
+	abstract protected function serializeFormData() : array;
+
+}
+<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu;
+
+use Closure;
+use FurkanGM\Trade\libs\muqsit\invmenu\inventory\InvMenuInventory;
+use FurkanGM\Trade\libs\muqsit\invmenu\metadata\MenuMetadata;
+use FurkanGM\Trade\libs\muqsit\invmenu\session\PlayerManager;
+use FurkanGM\Trade\libs\muqsit\invmenu\session\PlayerSession;
+use pocketmine\inventory\transaction\action\SlotChangeAction;
+use pocketmine\item\Item;
+use pocketmine\Player;
+
+abstract class InvMenu implements MenuIds{
+
+	public static function create(string $identifier) : SharedInvMenu{
+		return new SharedInvMenu(InvMenuHandler::getMenuType($identifier));
+	}
+
+	public static function createSessionized(string $identifier) : SessionizedInvMenu{
+		return new SessionizedInvMenu(InvMenuHandler::getMenuType($identifier));
+	}
+
+	/** @var MenuMetadata */
+	protected $type;
+
+	/** @var bool */
+	protected $readonly = false;
+
+	/** @var string|null */
+	protected $name;
+
+	/** @var callable|null */
+	protected $listener;
+
+	/** @var callable|null */
+	protected $inventory_close_listener;
+
+	public function __construct(MenuMetadata $type){
+		$this->type = $type;
+	}
+
+	public function getType() : MenuMetadata{
+		return $this->type;
+	}
+
+	public function getName() : ?string{
+		return $this->name;
+	}
+
+	public function setName(?string $name) : self{
+		$this->name = $name;
+		return $this;
+	}
+
+	public function isReadonly() : bool{
+		return $this->readonly;
+	}
+
+	public function readonly(bool $value = true) : self{
+		$this->readonly = $value;
+		return $this;
+	}
+
+	public function setListener(?callable $listener) : self{
+		$this->listener = $listener;
+		return $this;
+	}
+
+	public function setInventoryCloseListener(?callable $listener) : self{
+		$this->inventory_close_listener = $listener;
+		return $this;
+	}
+
+	public function copyProperties(InvMenu $menu) : void{
+		$this->setName($menu->getName())
+			->readonly($menu->isReadonly())
+			->setListener($menu->listener)
+			->setInventoryCloseListener($menu->inventory_close_listener);
+	}
+
+	final public function send(Player $player, ?string $name = null, ?Closure $callback = null) : void{
+		/** @var PlayerSession $session */
+		$session = PlayerManager::get($player);
+		if($session === null){
+			$callback(false);
+		}else{
+			$network = $session->getNetwork();
+			$network->dropPending();
+			$session->removeWindow();
+			$network->wait(function(bool $success) use($player, $session, $name, $callback) : void{
+				if($success){
+					$extradata = $session->getMenuExtradata();
+					$extradata->setName($name ?? $this->getName());
+					$extradata->setPosition($this->type->calculateGraphicPosition($player));
+					$this->type->sendGraphic($player, $extradata);
+					$session->setCurrentMenu($this, $callback);
+				}elseif($callback !== null){
+					$callback(false);
+				}
+			});
+		}
+	}
+
+	abstract public function getInventoryForPlayer(Player $player) : InvMenuInventory;
+
+	public function handleInventoryTransaction(Player $player, Item $in, Item $out, SlotChangeAction $action) : bool{
+		if($this->readonly){
+			if($this->listener !== null){
+				($this->listener)($player, $in, $out, $action);
+			}
+			return false;
+		}
+
+		return $this->listener === null || ($this->listener)($player, $in, $out, $action);
+	}
+
+	public function onClose(Player $player) : void{
+		if($this->inventory_close_listener !== null){
+			($this->inventory_close_listener)($player, $this->getInventoryForPlayer($player));
+		}
+
+		/** @var PlayerSession $session */
+		$session = PlayerManager::get($player);
+		$this->type->removeGraphic($player, $session->getMenuExtradata());
+		$session->removeCurrentMenu();
+	}
+}
+<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu;
+
+interface MenuIds{
+
+	public const TYPE_CHEST = "invmenu:chest";
+	public const TYPE_DOUBLE_CHEST = "invmenu:double_chest";
+	public const TYPE_HOPPER = "invmenu:hopper";
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu;
+
+use InvalidArgumentException;
+use FurkanGM\Trade\libs\muqsit\invmenu\metadata\DoubleBlockMenuMetadata;
+use FurkanGM\Trade\libs\muqsit\invmenu\metadata\MenuMetadata;
+use FurkanGM\Trade\libs\muqsit\invmenu\metadata\SingleBlockMenuMetadata;
+use pocketmine\block\BlockFactory;
+use pocketmine\block\BlockIds;
+use pocketmine\network\mcpe\protocol\types\WindowTypes;
+use pocketmine\plugin\Plugin;
+use pocketmine\tile\Tile;
+
+final class InvMenuHandler{
+
+	/** @var Plugin|null */
+	private static $registrant;
+
+	/** @var MenuMetadata[] */
+	private static $menu_types = [];
+
+	public static function getRegistrant() : Plugin{
+		return self::$registrant;
+	}
+
+	public static function register(Plugin $plugin) : void{
+		if(self::isRegistered()){
+			throw new InvalidArgumentException($plugin->getName() . " attempted to register " . self::class . " twice.");
+		}
+
+		self::$registrant = $plugin;
+		self::registerDefaultMenuTypes();
+		$plugin->getServer()->getPluginManager()->registerEvents(new InvMenuEventHandler(), $plugin);
+	}
+
+	public static function isRegistered() : bool{
+		return self::$registrant instanceof Plugin;
+	}
+
+	private static function registerDefaultMenuTypes() : void{
+		self::registerMenuType(new SingleBlockMenuMetadata(InvMenu::TYPE_CHEST, 27, WindowTypes::CONTAINER, BlockFactory::get(BlockIds::CHEST), Tile::CHEST));
+		self::registerMenuType(new DoubleBlockMenuMetadata(InvMenu::TYPE_DOUBLE_CHEST, 54, WindowTypes::CONTAINER, BlockFactory::get(BlockIds::CHEST), Tile::CHEST));
+		self::registerMenuType(new SingleBlockMenuMetadata(InvMenu::TYPE_HOPPER, 5, WindowTypes::HOPPER, BlockFactory::get(BlockIds::HOPPER_BLOCK), "Hopper"));
+	}
+
+	public static function registerMenuType(MenuMetadata $type, bool $override = false) : void{
+		if(isset(self::$menu_types[$identifier = $type->getIdentifier()]) && !$override){
+			throw new InvalidArgumentException("A menu type with the identifier \"" . $identifier . "\" is already registered as " . get_class(self::$menu_types[$identifier]));
+		}
+
+		self::$menu_types[$identifier] = $type;
+	}
+
+	public static function getMenuType(string $identifier) : ?MenuMetadata{
+		return self::$menu_types[$identifier] ?? null;
+	}
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu\metadata;
+
+use FurkanGM\Trade\libs\muqsit\invmenu\session\MenuExtradata;
+use pocketmine\block\Block;
+use pocketmine\math\Vector3;
+use pocketmine\nbt\NetworkLittleEndianNBTStream;
+use pocketmine\nbt\tag\CompoundTag;
+use pocketmine\network\mcpe\protocol\BlockActorDataPacket;
+use pocketmine\network\mcpe\protocol\UpdateBlockPacket;
+use pocketmine\Player;
+use pocketmine\tile\Nameable;
+use pocketmine\tile\Tile;
+
+class SingleBlockMenuMetadata extends MenuMetadata{
+
+	/** @var NetworkLittleEndianNBTStream */
+	protected static $serializer;
+
+	/** @var Block */
+	protected $block;
+
+	/** @var string */
+	protected $identifier;
+
+	/** @var int */
+	protected $size;
+
+	/** @var string */
+	protected $tile_id;
+
+	public function __construct(string $identifier, int $size, int $window_type, Block $block, string $tile_id){
+		parent::__construct($identifier, $size, $window_type);
+
+		if(self::$serializer === null){
+			self::$serializer = new NetworkLittleEndianNBTStream();
+		}
+
+		$this->block = $block;
+		$this->tile_id = $tile_id;
+	}
+
+	public function sendGraphic(Player $player, MenuExtradata $metadata) : void{
+		$positions = $this->getBlockPositions($metadata);
+		$name = $metadata->getName();
+		foreach($positions as $pos){
+			$packet = new UpdateBlockPacket();
+			$packet->x = $pos->x;
+			$packet->y = $pos->y;
+			$packet->z = $pos->z;
+			$packet->blockRuntimeId = $this->block->getRuntimeId();
+			$packet->flags = UpdateBlockPacket::FLAG_NETWORK;
+			$player->sendDataPacket($packet);
+			$player->sendDataPacket($this->getBlockActorDataPacketAt($player, $pos, $name));
+		}
+	}
+
+	protected function getBlockActorDataPacketAt(Player $player, Vector3 $pos, ?string $name) : BlockActorDataPacket{
+		$packet = new BlockActorDataPacket();
+		$packet->x = $pos->x;
+		$packet->y = $pos->y;
+		$packet->z = $pos->z;
+		$packet->namedtag = self::$serializer->write($this->getBlockActorDataAt($pos, $name));
+		return $packet;
+	}
+
+	protected function getBlockActorDataAt(Vector3 $pos, ?string $name) : CompoundTag{
+		$tag = new CompoundTag();
+		$tag->setString(Tile::TAG_ID, $this->tile_id);
+		if($name !== null){
+			$tag->setString(Nameable::TAG_CUSTOM_NAME, $name);
+		}
+		return $tag;
+	}
+
+	public function removeGraphic(Player $player, MenuExtradata $extradata) : void{
+		$level = $player->getLevel();
+		foreach($this->getBlockPositions($extradata) as $pos){
+			$packet = new UpdateBlockPacket();
+			$packet->x = $pos->x;
+			$packet->y = $pos->y;
+			$packet->z = $pos->z;
+			$packet->blockRuntimeId = $level->getBlockAt($pos->x, $pos->y, $pos->z)->getRuntimeId();
+			$packet->flags = UpdateBlockPacket::FLAG_NETWORK;
+			$player->sendDataPacket($packet);
+		}
+	}
+
+	protected function getBlockPositions(MenuExtradata $metadata) : array{
+		return [$metadata->getPosition()];
+	}
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu\metadata;
+
+use FurkanGM\Trade\libs\muqsit\invmenu\inventory\InvMenuInventory;
+use FurkanGM\Trade\libs\muqsit\invmenu\session\MenuExtradata;
+use pocketmine\math\Vector3;
+use pocketmine\Player;
+
+abstract class MenuMetadata{
+
+	/** @var string */
+	protected $identifier;
+
+	/** @var int */
+	protected $size;
+
+	/** @var int */
+	protected $window_type;
+
+	public function __construct(string $identifier, int $size, int $window_type){
+		$this->identifier = $identifier;
+		$this->size = $size;
+		$this->window_type = $window_type;
+	}
+
+	public function getIdentifier() : string{
+		return $this->identifier;
+	}
+
+	public function getSize() : int{
+		return $this->size;
+	}
+
+	public function getWindowType() : int{
+		return $this->window_type;
+	}
+
+	public function createInventory() : InvMenuInventory{
+		return new InvMenuInventory($this);
+	}
+
+	protected function calculateGraphicOffset(Player $player) : Vector3{
+		$offset = $player->getDirectionVector();
+		$offset->x *= -(1 + $player->width);
+		$offset->y *= -(1 + $player->height);
+		$offset->z *= -(1 + $player->width);
+		return $offset;
+	}
+
+	public function calculateGraphicPosition(Player $player) : Vector3{
+		return $player->getPosition()->add($this->calculateGraphicOffset($player))->floor();
+	}
+
+	abstract public function sendGraphic(Player $player, MenuExtradata $metadata) : void;
+
+	abstract public function removeGraphic(Player $player, MenuExtradata $extradata) : void;
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu\metadata;
+
+use FurkanGM\Trade\libs\muqsit\invmenu\session\MenuExtradata;
+use pocketmine\math\Vector3;
+use pocketmine\nbt\tag\CompoundTag;
+use pocketmine\Player;
+
+class DoubleBlockMenuMetadata extends SingleBlockMenuMetadata{
+
+	protected function getBlockActorDataAt(Vector3 $pos, ?string $name) : CompoundTag{
+		$tag = parent::getBlockActorDataAt($pos, $name);
+		$tag->setInt("pairx", $pos->x + (($pos->x & 1) ? 1 : -1));
+		$tag->setInt("pairz", $pos->z);
+		return $tag;
+	}
+
+	protected function getBlockPositions(MenuExtradata $metadata) : array{
+		$pos = $metadata->getPosition();
+		return [$pos, ($pos->x & 1) ? $pos->east() : $pos->west()];
+	}
+
+	protected function calculateGraphicOffset(Player $player) : Vector3{
+		$offset = parent::calculateGraphicOffset($player);
+		$offset->x *= 2;
+		$offset->z *= 2;
+		return $offset;
+	}
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu;
+
+use FurkanGM\Trade\libs\muqsit\invmenu\session\PlayerManager;
+use pocketmine\event\inventory\InventoryTransactionEvent;
+use pocketmine\event\Listener;
+use pocketmine\event\player\PlayerJoinEvent;
+use pocketmine\event\player\PlayerQuitEvent;
+use pocketmine\event\server\DataPacketReceiveEvent;
+use pocketmine\inventory\transaction\action\SlotChangeAction;
+use pocketmine\network\mcpe\protocol\NetworkStackLatencyPacket;
+
+class InvMenuEventHandler implements Listener{
+
+	/**
+	 * @param PlayerJoinEvent $event
+	 * @priority LOW
+	 */
+	public function onPlayerJoin(PlayerJoinEvent $event) : void{
+		PlayerManager::create($event->getPlayer());
+	}
+
+	/**
+	 * @param PlayerQuitEvent $event
+	 * @priority MONITOR
+	 */
+	public function onPlayerQuit(PlayerQuitEvent $event) : void{
+		PlayerManager::destroy($event->getPlayer());
+	}
+
+	/**
+	 * @param DataPacketReceiveEvent $event
+	 * @priority NORMAL
+	 * @ignoreCancelled true
+	 */
+	public function onDataPacketReceive(DataPacketReceiveEvent $event) : void{
+		$packet = $event->getPacket();
+		if($packet instanceof NetworkStackLatencyPacket){
+			$session = PlayerManager::get($event->getPlayer());
+			if($session !== null){
+				$session->getNetwork()->notify($packet->timestamp);
+			}
+		}
+	}
+
+	/**
+	 * @param InventoryTransactionEvent $event
+	 * @priority NORMAL
+	 * @ignoreCancelled true
+	 */
+	public function onInventoryTransaction(InventoryTransactionEvent $event) : void{
+		$transaction = $event->getTransaction();
+		$player = $transaction->getSource();
+
+		$session = PlayerManager::get($player);
+		if($session !== null){
+			$menu = $session->getCurrentMenu();
+			if($menu !== null){
+				$inventory = $menu->getInventoryForPlayer($player);
+				foreach($transaction->getActions() as $action){
+					if(
+						$action instanceof SlotChangeAction &&
+						$action->getInventory() === $inventory &&
+						!$menu->handleInventoryTransaction($player, $action->getSourceItem(), $action->getTargetItem(), $action)
+					){
+						$event->setCancelled();
+						break;
+					}
+				}
+			}
+		}
+	}
+}command = "trade"
+command.description = "Trade Command"
+command.usage = "§7» §4Usage: §c/trade <player>"
+command.yourself = "§7» §cYou cannot send a trade request to yourself."
+command.requestsend = "§7» §aA trade request has been sent to §e{%0}."
+command.playernotfound = "§7» §cPlayer not found."
+command.use = "§7» If you want accept trade request, use /trade accept command\n§7» If you want reject trade request, use /trade reject command"
+command.reject = "§7» The trade offer was rejected."
+
+gui.button.accept = "§aAccept"
+gui.button.cancel = "§cCancel"
+
+form.title = "§aYou have a trade offer"
+form.text = "§eDo you accept §6{%0} §etrade offer?"
+form.refused = "§7» §c{%0} §4has declined your trade offer"
+form.no_offer = "§7» There are no has offers available to accept."
+form.button.accept = "§aAccept"
+form.button.reject = "§cReject"
+
+trade.successful = "§aTrade Successful!"<?php
+
+namespace FurkanGM\Trade\command;
+
+use FurkanGM\Trade\Main;
+use pocketmine\command\Command;
+use pocketmine\command\CommandSender;
+use pocketmine\command\PluginIdentifiableCommand;
+use pocketmine\Player;
+use pocketmine\plugin\Plugin;
+
+class Trade extends Command implements PluginIdentifiableCommand
+{
+
+    /**
+     * @var Main
+     */
+    private $plugin;
+
+    /**
+     * Trade constructor.
+     */
+    public function __construct()
+    {
+		$this->plugin = Main::getInstance();
+		parent::__construct($this->plugin->translateText("command"), $this->plugin->translateText("command.description"), $this->plugin->translateText("command.usage"));
+    }
+
+    /**
+     * @param CommandSender $sender
+     * @param string $commandLabel
+     * @param array $args
+     * @return bool|mixed
+     */
+    public function execute(CommandSender $sender, string $commandLabel, array $args)
+    {
+        if ($sender instanceof Player){
+			$cfg = Main::getInstance()->getConfig()->get("type");
+			if (isset($args[0])){
+				if ($cfg == "command")
+				{
+					if ($args[0] == "accept" || $args[0] == "kabul")
+					{
+						$this->getPlugin()->getManager()->acceptTrade($sender);
+						return false;
+					}
+					elseif ($args[0] == "reject" || $args[0] == "reddet"){
+						$this->getPlugin()->getManager()->rejectTrade($sender);
+						return false;
+					}
+				}
+                if (($player = $this->plugin->getServer()->getPlayer($args[0])) instanceof Player){
+                    if ($player->getName() == $sender->getName()){
+                    	$sender->sendMessage($this->plugin->translateText("command.yourself"));
+                    	return false;
+                    }else {
+                    	$this->getPlugin()->getManager()->sendTrade($sender, $player);
+					}
+                }else{
+                    $sender->sendMessage($this->plugin->translateText("command.playernotfound"));
+                }
+            }else{
+				$sender->sendMessage($this->plugin->translateText("command.usage"));
+            }
+        }
+        return true;
+    }
+
+	/**
+	 * @return \pocketmine\plugin\Plugin
+	 */
+	public function getPlugin(): Plugin
+	{
+		return $this->plugin;
+	}
+
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu\session;
+
+use pocketmine\Player;
+
+final class PlayerManager{
+
+	/** @var PlayerSession[] */
+	private static $sessions = [];
+
+	public static function create(Player $player) : void{
+		self::$sessions[$player->getRawUniqueId()] = new PlayerSession($player);
+	}
+
+	public static function destroy(Player $player) : void{
+		self::$sessions[$uuid = $player->getRawUniqueId()]->finalize();
+		unset(self::$sessions[$uuid]);
+	}
+
+	public static function get(Player $player) : ?PlayerSession{
+		return self::$sessions[$player->getRawUniqueId()] ?? null;
+	}
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu\session;
+
+use Closure;
+use InvalidArgumentException;
+use InvalidStateException;
+use FurkanGM\Trade\libs\muqsit\invmenu\inventory\InvMenuInventory;
+use FurkanGM\Trade\libs\muqsit\invmenu\InvMenu;
+use FurkanGM\Trade\libs\muqsit\invmenu\InvMenuHandler;
+use pocketmine\network\mcpe\protocol\types\ContainerIds;
+use pocketmine\Player;
+
+class PlayerSession{
+
+	/** @var Player */
+	protected $player;
+
+	/** @var PlayerNetwork */
+	protected $network;
+
+	/** @var MenuExtradata */
+	protected $menu_extradata;
+
+	/** @var InvMenu|null */
+	protected $current_menu;
+
+	/** @var int */
+	protected $current_window_id = ContainerIds::NONE;
+
+	public function __construct(Player $player){
+		$this->player = $player;
+		$this->network = new PlayerNetwork($player);
+		$this->menu_extradata = new MenuExtradata();
+	}
+
+	/**
+	 * @internal
+	 */
+	public function finalize() : void{
+		if($this->current_menu !== null){
+			$this->removeWindow();
+		}
+	}
+
+	public function removeWindow() : void{
+		$window = $this->player->getWindow($this->current_window_id);
+		if($window instanceof InvMenuInventory){
+			$this->player->removeWindow($window);
+			$this->network->wait(static function(bool $success) : void{});
+		}
+		$this->current_window_id = ContainerIds::NONE;
+	}
+
+	private function sendWindow() : bool{
+		$this->removeWindow();
+
+		try{
+			$position = $this->menu_extradata->getPosition();
+			$inventory = $this->current_menu->getInventoryForPlayer($this->player);
+			/** @noinspection NullPointerExceptionInspection */
+			$inventory->moveTo($position->x, $position->y, $position->z);
+			$this->current_window_id = $this->player->addWindow($inventory);
+		}catch(InvalidStateException | InvalidArgumentException $e){
+			InvMenuHandler::getRegistrant()->getLogger()->debug("InvMenu failed to send inventory to " . $this->player->getName() . " due to: " . $e->getMessage());
+			$this->removeWindow();
+		}
+
+		return $this->current_window_id !== ContainerIds::NONE;
+	}
+
+	public function getMenuExtradata() : MenuExtradata{
+		return $this->menu_extradata;
+	}
+
+	/**
+	 * @internal use InvMenu::send() instead.
+	 *
+	 * @param InvMenu|null $menu
+	 * @param Closure|null $callback
+	 * @return bool
+	 */
+	public function setCurrentMenu(?InvMenu $menu, ?Closure $callback = null) : bool{
+		if($menu !== null){
+			$this->network->wait(function(bool $success) use($callback) : void{
+				if($success && $this->current_menu !== null){
+					if($this->sendWindow()){
+						if($callback !== null){
+							$callback(true);
+						}
+						return;
+					}
+					$this->setCurrentMenu(null);
+				}
+				if($callback !== null){
+					$callback(false);
+				}
+			});
+		}
+
+		$this->current_menu = $menu;
+		return true;
+	}
+
+	public function getNetwork() : PlayerNetwork{
+		return $this->network;
+	}
+
+	public function getCurrentMenu() : ?InvMenu{
+		return $this->current_menu;
+	}
+
+	/**
+	 * @internal use PlayerSession::removeWindow() instead
+	 * @return bool
+	 */
+	public function removeCurrentMenu() : bool{
+		return $this->setCurrentMenu(null);
+	}
+}
+<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu\session;
+
+use Closure;
+use pocketmine\network\mcpe\protocol\NetworkStackLatencyPacket;
+use pocketmine\Player;
+
+final class PlayerNetwork{
+
+	/** @var Player */
+	private $player;
+
+	/** @var Closure[] */
+	private $awaiting = [];
+
+	public function __construct(Player $player){
+		$this->player = $player;
+	}
+
+	public function dropPending() : void{
+		foreach($this->awaiting as $callback){
+			$callback(false);
+		}
+		$this->awaiting = [];
+	}
+
+	public function wait(Closure $then) : void{
+		$timestamp = mt_rand() * 1000; // TODO: remove this hack when fixed
+		$this->awaiting[$timestamp] = $then;
+		if(count($this->awaiting) === 1 && !$this->sendTimestamp($timestamp)){
+			$this->notify($timestamp, false);
+		}
+	}
+
+	public function notify(int $timestamp, bool $success = true) : void{
+		if(isset($this->awaiting[$timestamp])){
+			$this->awaiting[$timestamp]($success);
+			unset($this->awaiting[$timestamp]);
+			if(count($this->awaiting) > 0){
+				$this->sendTimestamp(array_keys($this->awaiting)[0]);
+			}
+		}
+	}
+
+	private function sendTimestamp(int $timestamp) : bool{
+		$pk = new NetworkStackLatencyPacket();
+		$pk->timestamp = $timestamp;
+		$pk->needResponse = true;
+		return $this->player->sendDataPacket($pk);
+	}
+}<?php
+
+/*
+ *  ___            __  __
+ * |_ _|_ ____   _|  \/  | ___ _ __  _   _
+ *  | || '_ \ \ / / |\/| |/ _ \ '_ \| | | |
+ *  | || | | \ V /| |  | |  __/ | | | |_| |
+ * |___|_| |_|\_/ |_|  |_|\___|_| |_|\__,_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author Muqsit
+ * @link http://github.com/Muqsit
+ *
+*/
+
+declare(strict_types=1);
+
+namespace FurkanGM\Trade\libs\muqsit\invmenu\session;
+
+use pocketmine\math\Vector3;
+
+class MenuExtradata{
+
+	/** @var Vector3|null */
+	protected $position;
+
+	/** @var string|null */
+	protected $name;
+
+	public function getPosition() : ?Vector3{
+		return $this->position;
+	}
+
+	public function getName() : ?string{
+		return $this->name;
+	}
+
+	public function setPosition(?Vector3 $pos) : void{
+		$this->position = $pos;
+	}
+
+	public function setName(?string $name) : void{
+		$this->name = $name;
+	}
+
+	public function reset() : void{
+		$this->position = null;
+		$this->name = null;
+	}
+}
